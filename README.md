@@ -26,28 +26,23 @@ It bridges `UART1` and a raw TCP socket over Wi-Fi, and exposes a single WS2812 
 ## 引脚映射
 
 - `UART1 RX = IO13`
-- `UART1 RX = IO13`
+- `UART1 接收引脚（RX）= IO13`
 - `UART1 TX = IO14`
-- `UART1 TX = IO14`
+- `UART1 发送引脚（TX）= IO14`
 - Wiring reminder: `ESP32 RX <- peer TX`, `ESP32 TX -> peer RX`, and share `GND`
 - 接线提醒：`ESP32 RX <- 对端 TX`、`ESP32 TX -> 对端 RX`，并确保共地 `GND`
 
 ## Minimum Hardware Requirements
 ## 最低硬件需求
 
-| Resource | Recommended | Theoretical Minimum |
-|----------|-------------|---------------------|
-| Chip | ESP32-S3 | ESP32-S3 |
-| SRAM | Depends on traffic/load | >= 256 KB |
-| Flash | 8 MB or above | >= 4 MB |
-| PSRAM | 8 MB | Optional (smaller buffers / lower peak throughput) |
-
-| 资源 | 推荐配置 | 理论最低需求 |
-|------|---------|---------------|
-| 芯片 | ESP32-S3 | ESP32-S3 |
-| SRAM | 取决于流量和负载 | >= 256 KB |
-| Flash | 8 MB 或以上 | >= 4 MB |
-| PSRAM | 8 MB | 可选（缓冲更小、峰值吞吐更低） |
+- Chip: recommended `ESP32-S3`; theoretical minimum `ESP32-S3`
+- 芯片：推荐 `ESP32-S3`；理论最低 `ESP32-S3`
+- SRAM: recommended depends on traffic/load; theoretical minimum `>= 256 KB`
+- SRAM：推荐值取决于流量和负载；理论最低 `>= 256 KB`
+- Flash: recommended `8 MB` or above; theoretical minimum `>= 4 MB`
+- Flash：推荐 `8 MB` 及以上；理论最低 `>= 4 MB`
+- PSRAM: recommended `8 MB`; theoretical minimum optional (smaller buffers / lower peak throughput)
+- PSRAM：推荐 `8 MB`；理论最低为可选（缓冲更小、峰值吞吐更低）
 
 The firmware is tested on **ESP32-S3-WROOM1-N16R8** (16 MB Flash / 8 MB PSRAM).
 该固件已在 **ESP32-S3-WROOM1-N16R8**（16 MB Flash / 8 MB PSRAM）上验证。
@@ -186,8 +181,6 @@ See:
 另请参阅：
 
 - `LICENSE`
-- `LICENSE`
-- `THIRD_PARTY_NOTICES.md`
 - `THIRD_PARTY_NOTICES.md`
 
 ## Source Distribution Note
@@ -201,7 +194,6 @@ For this project, that should include at least:
 
 - Application source code
 - 应用源代码
-- `platformio.ini`
 - `platformio.ini`
 - Build and flashing instructions
 - 构建与烧录说明
