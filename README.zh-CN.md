@@ -1,71 +1,35 @@
-# ESP32-C3 WiFi UART 桥接器
+# ESP WiFi UART 桥接器
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-这是一个基于 PlatformIO 和 Arduino 框架构建的 ESP32-C3 固件项目。
-它将 `UART1` 与 Wi-Fi 上的原始 TCP 套接字进行桥接，并使用板载 `IO8` 状态灯。
+ESP WiFi UART Bridge 是一个通过 Wi-Fi 暴露 TCP 套接字，并将其桥接到硬件 UART 的固件项目。
+仓库通过独立分支维护不同目标板的固件，这样板级引脚映射、状态灯接法和内存调优就可以分别演进。
 
-## 功能特性
+## 分支布局
+
+| 分支 | 目标平台 | UART 引脚 | 状态灯 |
+|------|----------|-----------|--------|
+| `ESP32S3` | ESP32-S3 配置 | `RX=IO13`、`TX=IO14` | `IO48` 上的 WS2812 |
+| `ESP32C3` | ESP32-C3 SuperMini 配置 | `RX=IO3`、`TX=IO4` | `IO8` 板载 LED |
+
+构建或烧录前，请先切换到与你硬件匹配的分支。
+
+## 共通特性
 
 - `UART1 <-> TCP` 双向桥接
 - 提供 Web 配置页面，可管理 UART 参数和 Wi-Fi 配置组
-- UART 帧格式可选：5/6/7/8 数据位、N/E/O 校验位、1/2 停止位
-- 若初始 STA 连接超时，自动回退到 AP 模式
-- 桥接缓冲优先使用 PSRAM（若可用），并支持回退到 SRAM
-- 使用板载 `IO8` 状态灯
-
-## 引脚映射
-
-- `UART1 RX = IO3`
-- `UART1 TX = IO4`
-- 接线提醒：`ESP32 RX <- 对端 TX`、`ESP32 TX -> 对端 RX`，并确保共地 `GND`
-
-## 最低硬件需求
-
-- 板型：`ESP32-C3 SuperMini`
-- SRAM：推荐值取决于流量和负载；理论最低 `>= 256 KB`
-- Flash：推荐 `8 MB` 及以上；理论最低 `>= 4 MB`
-- PSRAM：推荐 `8 MB`；理论最低为可选（缓冲更小、峰值吞吐更低）
-
-当前配置面向 PlatformIO 的 `nologo_esp32c3_super_mini` 板型，默认 `UART1 RX=IO3`、`TX=IO4`，状态灯接在 `IO8`。
-ESP32-C3 板通常不带 PSRAM，因此该目标下桥接缓冲将使用内部 SRAM。
-
-## 快速开始
-
-1. 构建并烧录固件。
-2. 以 `115200` 打开串口监视器，查看启动日志和 IP 信息。
-3. 若没有可用 STA 配置，或启动时 STA 连接超时，连接 AP：`ESP32C3-UART` / `12345678`。
-4. AP 模式访问 `http://192.168.4.1/`，STA 模式访问 `http://<设备IP>/`。
-5. 在网页中保存或启用 Wi-Fi 配置组后，固件会立即重配 Wi-Fi。
-
-## 状态灯
-
-- 快闪：未连接 Wi-Fi
-- 慢闪：已连接 Wi-Fi，但没有 TCP 客户端
-- 常亮：TCP 客户端已连接
-- 快速闪烁叠加：UART/TCP 正在传输数据
-
-## 网络行为
-
-- TCP 桥接端口：`6638`
-- STA 模式下，服务监听 station IP
-- AP 模式下，服务监听 softAP IP（默认 `192.168.4.1`）
-- HTTP 配置页端口：`80`
-
-## HTTP API 速查
-
-- `GET /`：返回 Web 配置页面（HTML）
-- `GET /api/wifi`：返回当前 Wi-Fi 状态和已保存配置组
-- `POST /api/wifi/scan`：触发 Wi-Fi 扫描并返回附近网络列表
-- `POST /api/wifi/save`：保存配置组（`index`、`ssid`、可选 `password`、可选 `activate=1`）
-- `POST /api/wifi/activate`：启用配置组（`index`）
-- `POST /api/wifi/delete`：删除配置组（`index`）
-- `GET /api/uart`：返回当前 UART 参数
-- `POST /api/uart`：应用 UART 参数（`baudRate`、`dataBits`、`parity`、`stopBits`）
+- 支持 Wi-Fi STA 模式，启动时 STA 连接超时会自动回退到 AP 模式
+- TCP 桥接服务端口为 `6638`
+- 支持通过 `platformio.ini` 进行可选的构建时 Wi-Fi 初始化
+- 支持通过 `socat` 在 Linux 下映射为伪串口
 
 ## 构建
 
 本项目使用 PlatformIO。
+
+1. 切换到目标硬件对应的分支。
+2. 检查该分支中的 `platformio.ini`。
+3. 执行构建：
 
 ```bash
 ~/.platformio/penv/bin/platformio run
@@ -81,6 +45,8 @@ ESP32-C3 板通常不带 PSRAM，因此该目标下桥接缓冲将使用内部 S
 
 ## 查看日志
 
+示例：
+
 ```bash
 ~/.platformio/penv/bin/platformio device monitor --baud 115200
 ```
@@ -95,18 +61,11 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 
 然后在你的串口软件中使用 `/dev/ttyESP32` 进行通信。
 
-## Wi-Fi 配置说明
+## 配置说明
 
-- 最多可在 NVS Preferences 中保存 24 组 Wi-Fi 配置
-- 保存时可将密码留空，以保留该槽位已有密码
-- `WIFI_SSID` / `WIFI_PASSWORD` 构建宏仅在“无任何已存配置”时用于首次初始化
-
-## 常见问题排查
-
-- 网页打不开：先在串口日志确认 IP，并确保电脑与设备处于同一网段
-- TCP 客户端连不上：检查防火墙/路由，并确认端口 `6638` 可达
-- 串口乱码：确认两端波特率、数据位、校验位、停止位完全一致
-- 高负载丢包：降低发送速率，或在内存允许时增大缓冲区
+- Wi-Fi 凭据可通过 Web 界面写入，并保存在 NVS Preferences 中
+- 最多支持 24 组 Wi-Fi 配置
+- 缓冲区大小、UART FIFO 阈值、状态灯行为和板级配置会因 `ESP32S3` 与 `ESP32C3` 分支不同而有所区别，这些差异是有意保留的
 
 ## 许可证
 
