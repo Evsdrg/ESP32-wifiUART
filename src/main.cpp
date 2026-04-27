@@ -1,8 +1,6 @@
 #include <Arduino.h>
 #include <cinttypes>
 #include <ArduinoJson.h>
-#include <esp32-hal-psram.h>
-#include <FastLED.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -11,6 +9,26 @@ namespace {
 
 constexpr uint32_t kDebugBaudRate = 115200;
 constexpr uint32_t kUartBaudRate = 115200;
+constexpr bool kEnableDebugLogs = false;
+
+template <typename... Args>
+void debugPrintf(const char *format, Args... args) {
+  if constexpr (kEnableDebugLogs) {
+    log_i(format, args...);
+  }
+}
+
+void debugPrint(const char *message) {
+  if constexpr (kEnableDebugLogs) {
+    log_i("%s", message);
+  }
+}
+
+void debugPrintln(const char *message) {
+  if constexpr (kEnableDebugLogs) {
+    log_i("%s", message);
+  }
+}
 
 #ifndef UART1_RX_PIN
 #define UART1_RX_PIN 18
@@ -18,6 +36,14 @@ constexpr uint32_t kUartBaudRate = 115200;
 
 #ifndef UART1_TX_PIN
 #define UART1_TX_PIN 17
+#endif
+
+#ifndef STATUS_LED_PIN
+#define STATUS_LED_PIN 8
+#endif
+
+#ifndef STATUS_LED_ACTIVE_LEVEL
+#define STATUS_LED_ACTIVE_LEVEL 0
 #endif
 
 #ifndef WIFI_SSID
@@ -29,7 +55,7 @@ constexpr uint32_t kUartBaudRate = 115200;
 #endif
 
 #ifndef AP_SSID
-#define AP_SSID "ESP32S3-UART"
+#define AP_SSID "ESP32C3-UART"
 #endif
 
 #ifndef AP_PASSWORD
@@ -42,21 +68,20 @@ constexpr uint32_t kUartBaudRate = 115200;
 
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 constexpr uint32_t kWifiReconnectIntervalMs = 3000;
+constexpr wifi_power_t kWifiTxPower = WIFI_POWER_8_5dBm;
 constexpr uint32_t kUartBackpressureLogIntervalMs = 2000;
 constexpr uint32_t kStatsLogIntervalMs = 10000;
-constexpr uint32_t kActivityFlashWindowMs = 220;
-constexpr uint32_t kActivityPulseMs = 45;
-constexpr uint32_t kActivityPulseGapMs = 55;
+constexpr uint32_t kDisconnectedBlinkPeriodMs = 140;
+constexpr uint32_t kWifiBlinkPeriodMs = 700;
+constexpr uint32_t kDataFlashWindowMs = 120;
+constexpr uint8_t kUartRxFifoFullThreshold = 112;
 constexpr size_t kIoChunkSize = 256;
-constexpr size_t kPendingTcpToUartBytes = 16384;
-constexpr size_t kPendingUartToTcpBytes = 32768;
-constexpr size_t kUartDriverRxBufferSize = 16384;
+constexpr size_t kPendingTcpToUartBytes = 12288;
+constexpr size_t kPendingUartToTcpBytes = 20480;
+constexpr size_t kUartDriverRxBufferSize = 8192;
 constexpr size_t kUartDriverTxBufferSize = 4096;
 constexpr uint8_t kMaxWiFiProfiles = 24;
 constexpr uint16_t kHttpPort = 80;
-constexpr uint8_t kLedBrightness = 10;
-constexpr uint8_t kLedPin = 48;
-constexpr uint8_t kLedCount = 1;
 
 /**
  * @brief UART1 framing and speed settings used by the bridge.
@@ -93,7 +118,7 @@ constexpr char kConfigPageHtml[] PROGMEM = R"HTML(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>ESP32-S3 串口配置</title>
+  <title>ESP32-C3 串口配置</title>
   <style>
     :root { color-scheme: dark; }
     body { font-family: Arial, sans-serif; margin: 0; background: #111827; color: #e5e7eb; }
@@ -134,7 +159,7 @@ constexpr char kConfigPageHtml[] PROGMEM = R"HTML(
 </head>
 <body>
   <main>
-    <h1>ESP32-S3 串口桥控制台</h1>
+    <h1>ESP32-C3 串口桥控制台</h1>
     <p>查看并修改 TCP 串口桥当前使用的 UART1 参数。</p>
     <section class="card">
       <form id="uart-form">
@@ -521,30 +546,45 @@ class ByteRingBuffer {
       return false;
     }
 
-    data_ = static_cast<uint8_t *>(ps_malloc(capacity));
-    usingPsram_ = data_ != nullptr;
-    if (data_ == nullptr) {
-      data_ = static_cast<uint8_t *>(malloc(capacity));
-    }
+    data_ = static_cast<uint8_t *>(malloc(capacity));
 
     if (data_ == nullptr) {
       capacity_ = 0;
+      ownsStorage_ = false;
       usingPsram_ = false;
       return false;
     }
 
     capacity_ = capacity;
+    ownsStorage_ = true;
+    clear();
+    return true;
+  }
+
+  [[nodiscard]]
+  bool begin(uint8_t *storage, size_t capacity) {
+    release();
+
+    if (storage == nullptr || capacity == 0) {
+      return false;
+    }
+
+    data_ = storage;
+    capacity_ = capacity;
+    ownsStorage_ = false;
+    usingPsram_ = false;
     clear();
     return true;
   }
 
   void release() {
-    if (data_ != nullptr) {
+    if (ownsStorage_ && data_ != nullptr) {
       free(data_);
-      data_ = nullptr;
     }
 
+    data_ = nullptr;
     capacity_ = 0;
+    ownsStorage_ = false;
     usingPsram_ = false;
     head_ = 0;
     tail_ = 0;
@@ -614,6 +654,7 @@ class ByteRingBuffer {
  private:
   uint8_t *data_ = nullptr;
   size_t capacity_ = 0;
+  bool ownsStorage_ = false;
   bool usingPsram_ = false;
   size_t head_ = 0;
   size_t tail_ = 0;
@@ -625,7 +666,8 @@ WiFiServer TcpServer(TCP_BRIDGE_PORT);
 WiFiClient TcpClient;
 WebServer HttpServer(kHttpPort);
 Preferences PreferencesStore;
-CRGB Leds[kLedCount];
+uint8_t gTcpToUartStorage[kPendingTcpToUartBytes] = {};
+uint8_t gUartToTcpStorage[kPendingUartToTcpBytes] = {};
 ByteRingBuffer gTcpToUartBuffer;
 ByteRingBuffer gUartToTcpBuffer;
 UartSettings gUartSettings = {kUartBaudRate, 8, 'N', 1};
@@ -656,6 +698,12 @@ size_t gWiFiScanResultCount = 0;
 
 void clearSessionBuffers();
 void showStatusLed();
+
+void writeStatusLed(bool on) {
+  const int activeLevel = STATUS_LED_ACTIVE_LEVEL ? HIGH : LOW;
+  const int inactiveLevel = STATUS_LED_ACTIVE_LEVEL ? LOW : HIGH;
+  digitalWrite(STATUS_LED_PIN, on ? activeLevel : inactiveLevel);
+}
 
 void sendJsonDocument(int statusCode, JsonDocument &doc) {
   String response;
@@ -717,8 +765,8 @@ void loadWiFiProfiles() {
     char ssidKey[4] = {0};
     char passwordKey[4] = {0};
     makeWiFiProfileKeys(i, ssidKey, passwordKey);
-    const String ssid = PreferencesStore.getString(ssidKey, String());
-    const String password = PreferencesStore.getString(passwordKey, String());
+    const String ssid = PreferencesStore.isKey(ssidKey) ? PreferencesStore.getString(ssidKey, String()) : String();
+    const String password = PreferencesStore.isKey(passwordKey) ? PreferencesStore.getString(passwordKey, String()) : String();
     gWiFiProfiles[i] = {!ssid.isEmpty(), ssid, password};
   }
 
@@ -727,6 +775,16 @@ void loadWiFiProfiles() {
     gActiveWiFiProfileIndex = static_cast<int8_t>(activeIndex);
   } else {
     gActiveWiFiProfileIndex = -1;
+  }
+
+  debugPrintf(
+      "Loaded Wi-Fi profiles: count=%d active=%d\n",
+      countStoredWiFiProfiles(),
+      gActiveWiFiProfileIndex);
+  if (gActiveWiFiProfileIndex >= 0) {
+    debugPrintf(
+        "Active Wi-Fi profile SSID: %s\n",
+        gWiFiProfiles[gActiveWiFiProfileIndex].ssid.c_str());
   }
 }
 
@@ -771,12 +829,16 @@ void deleteWiFiProfile(uint8_t index) {
  */
 void seedDefaultWiFiProfileIfNeeded() {
   if (countStoredWiFiProfiles() > 0 || strlen(WIFI_SSID) == 0) {
+    debugPrintf(
+        "Skipping build-flag Wi-Fi seed: profiles=%d, wifi_ssid_empty=%s\n",
+        countStoredWiFiProfiles(),
+        strlen(WIFI_SSID) == 0 ? "yes" : "no");
     return;
   }
 
   if (saveWiFiProfile(0, WIFI_SSID, WIFI_PASSWORD)) {
     setActiveWiFiProfileIndex(0);
-    Serial.println("Seeded Wi-Fi profile slot 0 from build flags");
+    debugPrintln("Seeded Wi-Fi profile slot 0 from build flags");
   }
 }
 
@@ -986,11 +1048,18 @@ bool applyUartSettings(const UartSettings &settings) {
   UartPort.end();
   UartPort.setRxBufferSize(kUartDriverRxBufferSize);
   UartPort.setTxBufferSize(kUartDriverTxBufferSize);
-  UartPort.begin(settings.baudRate, serialConfig, UART1_RX_PIN, UART1_TX_PIN);
+  UartPort.begin(
+      settings.baudRate,
+      serialConfig,
+      UART1_RX_PIN,
+      UART1_TX_PIN,
+      false,
+      20000UL,
+      kUartRxFifoFullThreshold);
   UartPort.setTimeout(0);
   gUartSettings = settings;
 
-  Serial.printf(
+  debugPrintf(
       "UART1 reconfigured. Baud=%" PRIu32 ", Data=%u, Parity=%c, Stop=%u\n",
       gUartSettings.baudRate,
       gUartSettings.dataBits,
@@ -1247,18 +1316,18 @@ void initHttpServer() {
   HttpServer.on("/api/uart", HTTP_POST, handleSetUartSettings);
   HttpServer.onNotFound(handleNotFound);
   HttpServer.begin();
-  Serial.printf("HTTP config page listening on port %u\n", kHttpPort);
+  debugPrintf("HTTP config page listening on port %u\n", kHttpPort);
 }
 
 /**
  * @brief Initialize bridge ring buffers for both data directions.
- * @details Allocation prefers PSRAM and falls back to internal SRAM.
+ * @details The C3 build binds both ring buffers to fixed static storage for long-run determinism.
  * @retval true Both buffers were allocated successfully.
  * @retval false At least one allocation failed.
  */
 bool initBridgeBuffers() {
-  const bool tcpToUartReady = gTcpToUartBuffer.begin(kPendingTcpToUartBytes);
-  const bool uartToTcpReady = gUartToTcpBuffer.begin(kPendingUartToTcpBytes);
+  const bool tcpToUartReady = gTcpToUartBuffer.begin(gTcpToUartStorage, sizeof(gTcpToUartStorage));
+  const bool uartToTcpReady = gUartToTcpBuffer.begin(gUartToTcpStorage, sizeof(gUartToTcpStorage));
 
   if (!tcpToUartReady || !uartToTcpReady) {
     gTcpToUartBuffer.release();
@@ -1266,7 +1335,7 @@ bool initBridgeBuffers() {
     return false;
   }
 
-  Serial.printf(
+  debugPrintf(
       "Bridge buffers ready. TCP->UART=%" PRIu32 " (%s), UART->TCP=%" PRIu32 " (%s)\n",
       static_cast<uint32_t>(gTcpToUartBuffer.capacity()),
       gTcpToUartBuffer.usingPsram() ? "PSRAM" : "SRAM",
@@ -1285,36 +1354,22 @@ void markActivity() {
 
 void showStatusLed() {
   const bool wifiConnected = WiFi.status() == WL_CONNECTED;
-  const bool accessPointActive = gAccessPointActive;
   const bool tcpClientConnected = isTcpClientConnected();
-  const bool wifiScanInProgress = gWifiScanInProgress;
-
-  CRGB baseColor = CRGB::Red;
-  if (tcpClientConnected) {
-    baseColor = CRGB::Purple;
-  } else if (wifiConnected) {
-    baseColor = CRGB::Green;
-  } else if (accessPointActive) {
-    baseColor = CRGB::Orange;
-  }
-
   const uint32_t activityAgeMs = millis() - gLastActivityAtMs;
-  const bool inActivityWindow = activityAgeMs <= kActivityFlashWindowMs;
-  const bool firstPulse = activityAgeMs < kActivityPulseMs;
-  const bool secondPulse =
-      activityAgeMs >= (kActivityPulseMs + kActivityPulseGapMs) &&
-      activityAgeMs < (2 * kActivityPulseMs + kActivityPulseGapMs);
-  const bool scanBlinkOn = (millis() / 180) % 2 == 0;
+  const bool inDataFlashWindow = activityAgeMs <= kDataFlashWindowMs;
 
-  if (wifiScanInProgress) {
-    Leds[0] = scanBlinkOn ? CRGB::Green : CRGB::Black;
-  } else if (inActivityWindow) {
-    Leds[0] = (firstPulse || secondPulse) ? CRGB::Blue : CRGB::Black;
+  bool ledOn = false;
+  if (inDataFlashWindow) {
+    ledOn = (millis() / 40) % 2 == 0;
+  } else if (tcpClientConnected) {
+    ledOn = true;
+  } else if (wifiConnected) {
+    ledOn = (millis() / kWifiBlinkPeriodMs) % 2 == 0;
   } else {
-    Leds[0] = baseColor;
+    ledOn = (millis() / kDisconnectedBlinkPeriodMs) % 2 == 0;
   }
 
-  FastLED.show();
+  writeStatusLed(ledOn);
 }
 
 void stopTcpServer() {
@@ -1338,7 +1393,7 @@ void disconnectTcpClient(const char *reason) {
   if (hadSession) {
     ++gTcpClientDisconnectCount;
   }
-  Serial.printf("TCP client disconnected: %s\n", reason);
+  debugPrintf("TCP client disconnected: %s\n", reason);
 }
 
 void startTcpServer() {
@@ -1349,11 +1404,11 @@ void startTcpServer() {
   TcpServer.begin();
   TcpServer.setNoDelay(true);
   gTcpServerStarted = true;
-  Serial.printf("TCP bridge listening on port %d\n", TCP_BRIDGE_PORT);
+  debugPrintf("TCP bridge listening on port %d\n", TCP_BRIDGE_PORT);
 }
 
 void logStationReady() {
-  Serial.printf(
+  debugPrintf(
       "STA mode ready. IP: %s, TCP port: %d\n",
       WiFi.localIP().toString().c_str(),
       TCP_BRIDGE_PORT);
@@ -1365,17 +1420,27 @@ void startAccessPoint() {
   WiFi.mode(WIFI_AP);
 
   if (!WiFi.softAP(AP_SSID, AP_PASSWORD)) {
-    Serial.println("Failed to start WiFi AP");
+    debugPrintln("Failed to start WiFi AP");
     return;
   }
 
   gAccessPointActive = true;
-  Serial.printf(
+  debugPrintf(
       "AP mode ready. SSID: %s, password: %s, IP: %s, TCP port: %d\n",
       AP_SSID,
       AP_PASSWORD,
       WiFi.softAPIP().toString().c_str(),
       TCP_BRIDGE_PORT);
+}
+
+void stopStationBeforeAccessPoint() {
+  gUseStationMode = false;
+  gStationWasConnected = false;
+  WiFi.setAutoReconnect(false);
+  WiFi.disconnect(false, false);
+  delay(100);
+  WiFi.mode(WIFI_MODE_NULL);
+  delay(100);
 }
 
 /**
@@ -1385,7 +1450,7 @@ void startAccessPoint() {
 void startStationMode() {
   const WiFiProfile *activeProfile = getActiveWiFiProfile();
   if (activeProfile == nullptr) {
-    Serial.println("No active Wi-Fi profile, unable to enter STA mode");
+    debugPrintln("No active Wi-Fi profile, unable to enter STA mode");
     return;
   }
 
@@ -1402,7 +1467,7 @@ void startStationMode() {
   WiFi.setAutoReconnect(true);
   WiFi.begin(activeProfile->ssid.c_str(), activeProfile->password.c_str());
   gLastWifiReconnectAttemptMs = millis();
-  Serial.printf("Connecting to WiFi SSID: %s\n", activeProfile->ssid.c_str());
+  debugPrintf("Connecting to WiFi SSID: %s\n", activeProfile->ssid.c_str());
 }
 
 /**
@@ -1413,10 +1478,10 @@ void waitForInitialStationConnection() {
   const uint32_t startMs = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startMs < kWifiConnectTimeoutMs) {
     delay(250);
-    Serial.print('.');
+    debugPrint(".");
     showStatusLed();
   }
-  Serial.println();
+  debugPrintln("");
 
   if (WiFi.status() == WL_CONNECTED) {
     gStationWasConnected = true;
@@ -1424,9 +1489,8 @@ void waitForInitialStationConnection() {
     logStationReady();
     startTcpServer();
   } else {
-    Serial.println("Initial WiFi connect timed out, falling back to AP mode");
-    WiFi.disconnect(true, true);
-    delay(100);
+    debugPrintln("Initial WiFi connect timed out, falling back to AP mode");
+    stopStationBeforeAccessPoint();
     startAccessPoint();
     startTcpServer();
   }
@@ -1447,7 +1511,7 @@ void handleStationMode() {
 
   if (!connected && gStationWasConnected) {
     gStationWasConnected = false;
-    Serial.println("WiFi disconnected");
+    debugPrintln("WiFi disconnected");
     stopTcpServer();
     if (gTcpClientActive) {
       disconnectTcpClient("wifi lost");
@@ -1455,7 +1519,7 @@ void handleStationMode() {
   }
 
   if (!connected && millis() - gLastWifiReconnectAttemptMs >= kWifiReconnectIntervalMs) {
-    Serial.println("Retrying WiFi connection");
+    debugPrintln("Retrying WiFi connection");
     if (!WiFi.reconnect()) {
       const WiFiProfile *activeProfile = getActiveWiFiProfile();
       if (activeProfile != nullptr) {
@@ -1487,8 +1551,7 @@ void applyPendingWiFiReconfigureIfNeeded() {
   if (gTcpClientActive) {
     disconnectTcpClient("wifi profile removed");
   }
-  WiFi.disconnect(true, true);
-  delay(100);
+  stopStationBeforeAccessPoint();
   startAccessPoint();
   startTcpServer();
 }
@@ -1515,7 +1578,7 @@ void acceptClientIfNeeded() {
   TcpClient = newClient;
   gTcpClientActive = true;
   ++gTcpClientConnectCount;
-  Serial.printf("TCP client connected: %s\n", TcpClient.remoteIP().toString().c_str());
+  debugPrintf("TCP client connected: %s\n", TcpClient.remoteIP().toString().c_str());
 }
 
 /**
@@ -1605,7 +1668,7 @@ void pullUartIntoBuffer() {
     ++gUartBackpressureEvents;
     ++gUartToTcpOverflowEvents;
     gLastUartBackpressureLogAtMs = millis();
-    Serial.printf(
+    debugPrintf(
         "Warning: UART backlog full (%" PRIu32 " bytes pending). Data loss is possible if the sender keeps streaming.\n",
         static_cast<uint32_t>(kPendingUartToTcpBytes));
   }
@@ -1622,10 +1685,18 @@ void flushUartBufferToTcp() {
 
   uint8_t buffer[kIoChunkSize];
   while (isTcpClientConnected() && gUartToTcpBuffer.size() > 0) {
+    if (!TcpClient.connected()) {
+      disconnectTcpClient("peer reset before write");
+      break;
+    }
+
     const size_t chunkSize = min(gUartToTcpBuffer.size(), sizeof(buffer));
     gUartToTcpBuffer.peek(buffer, chunkSize);
     const size_t written = TcpClient.write(buffer, chunkSize);
     if (written == 0) {
+      if (!TcpClient.connected()) {
+        disconnectTcpClient("peer reset during write");
+      }
       break;
     }
 
@@ -1645,9 +1716,15 @@ void logBridgeStatsIfNeeded() {
   }
 
   gLastStatsLogAtMs = millis();
-  Serial.printf(
-      "Stats: wifi=%s tcp=%s uart->tcp=%" PRIu64 " tcp->uart=%" PRIu64 " pending(u2t/t2u)=%" PRIu32 "/%" PRIu32 " tcp_conn=%" PRIu32 " tcp_disc=%" PRIu32 " wifi_reconn=%" PRIu32 " uart_backpressure=%" PRIu32 " uart_overflow=%" PRIu32 " tcp_overflow=%" PRIu32 " tcp_partial=%" PRIu32 "\n",
-      WiFi.status() == WL_CONNECTED ? "up" : "down",
+  const bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  const String ip = gAccessPointActive ? WiFi.softAPIP().toString() : (wifiConnected ? WiFi.localIP().toString() : String("-"));
+  const String ssid = gAccessPointActive ? String(AP_SSID) : (wifiConnected ? WiFi.SSID() : String("-"));
+  debugPrintf(
+      "Stats: wifi=%s ap=%s ssid=%s ip=%s tcp=%s uart->tcp=%" PRIu64 " tcp->uart=%" PRIu64 " pending(u2t/t2u)=%" PRIu32 "/%" PRIu32 " tcp_conn=%" PRIu32 " tcp_disc=%" PRIu32 " wifi_reconn=%" PRIu32 " uart_backpressure=%" PRIu32 " uart_overflow=%" PRIu32 " tcp_overflow=%" PRIu32 " tcp_partial=%" PRIu32 "\n",
+      wifiConnected ? "up" : "down",
+      gAccessPointActive ? "on" : "off",
+      ssid.c_str(),
+      ip.c_str(),
       isTcpClientConnected() ? "up" : "down",
       static_cast<uint64_t>(gUartToTcpBytes),
       static_cast<uint64_t>(gTcpToUartBytes),
@@ -1665,30 +1742,32 @@ void logBridgeStatsIfNeeded() {
 }  // namespace
 
 void setup() {
-  Serial.begin(kDebugBaudRate);
+  if constexpr (kEnableDebugLogs) {
+    Serial.begin(kDebugBaudRate);
+  }
   if (!initPreferences()) {
-    Serial.println("Failed to initialize Preferences. Restarting in 2 seconds.");
+    debugPrintln("Failed to initialize Preferences. Restarting in 2 seconds.");
     delay(2000);
     ESP.restart();
   }
 
   if (!initBridgeBuffers()) {
-    Serial.println("Failed to allocate bridge buffers. Restarting in 2 seconds.");
+    debugPrintln("Failed to allocate bridge buffers. Restarting in 2 seconds.");
     delay(2000);
     ESP.restart();
   }
 
   if (!applyUartSettings(gUartSettings)) {
-    Serial.println("Failed to initialize UART1. Restarting in 2 seconds.");
+    debugPrintln("Failed to initialize UART1. Restarting in 2 seconds.");
     delay(2000);
     ESP.restart();
   }
 
-  FastLED.addLeds<WS2812, kLedPin, GRB>(Leds, kLedCount);
-  FastLED.setBrightness(kLedBrightness);
+  pinMode(STATUS_LED_PIN, OUTPUT);
   showStatusLed();
 
   WiFi.setSleep(false);
+  WiFi.setTxPower(kWifiTxPower);
   if (getActiveWiFiProfile() != nullptr) {
     startStationMode();
     waitForInitialStationConnection();
@@ -1699,7 +1778,7 @@ void setup() {
   initHttpServer();
   gLastStatsLogAtMs = millis();
 
-  Serial.printf(
+  debugPrintf(
       "UART1 bridge ready. RX=%d, TX=%d, Baud=%" PRIu32 ", %u%c%u\n",
       UART1_RX_PIN,
       UART1_TX_PIN,

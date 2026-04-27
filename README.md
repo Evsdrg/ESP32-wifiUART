@@ -1,9 +1,9 @@
-# ESP32-S3 WiFi UART Bridge
+# ESP32-C3 WiFi UART Bridge
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-An ESP32-S3 firmware project built with PlatformIO and the Arduino framework.
-It bridges `UART1` and a raw TCP socket over Wi-Fi, and exposes a single WS2812 status LED on `IO48`.
+An ESP32-C3 firmware project built with PlatformIO and the Arduino framework.
+It bridges `UART1` and a raw TCP socket over Wi-Fi, and uses the onboard status LED on `IO8`.
 
 ## Features
 
@@ -11,40 +11,39 @@ It bridges `UART1` and a raw TCP socket over Wi-Fi, and exposes a single WS2812 
 - Web configuration page for UART and Wi-Fi profile management
 - UART framing options: 5/6/7/8 data bits, parity N/E/O, stop bits 1/2
 - Automatic fallback to AP mode if initial STA connection times out
-- PSRAM-backed bridge buffers with SRAM fallback
-- WS2812 status LED on `IO48`
+- Bridge buffers that prefer PSRAM when available and fall back to SRAM
+- Onboard status LED on `IO8`
 
 ## Pin Mapping
 
-- `UART1 RX = IO13`
-- `UART1 TX = IO14`
+- `UART1 RX = IO3`
+- `UART1 TX = IO4`
 - Wiring reminder: `ESP32 RX <- peer TX`, `ESP32 TX -> peer RX`, and share `GND`
 
 ## Minimum Hardware Requirements
 
-- Chip: recommended `ESP32-S3`; theoretical minimum `ESP32-S3`
+- Chip: `ESP32-C3 SuperMini`
 - SRAM: recommended depends on traffic/load; theoretical minimum `>= 256 KB`
 - Flash: recommended `8 MB` or above; theoretical minimum `>= 4 MB`
 - PSRAM: recommended `8 MB`; theoretical minimum optional (smaller buffers / lower peak throughput)
 
-The firmware is tested on **ESP32-S3-WROOM1-N16R8** (16 MB Flash / 8 MB PSRAM).
-To target smaller boards, reduce bridge and UART driver buffer sizes in `src/main.cpp` if needed.
+This configuration targets the `nologo_esp32c3_super_mini` PlatformIO board with `UART1 RX=IO3`, `TX=IO4`, and status LED on `IO8`.
+ESP32-C3 boards do not provide PSRAM, so bridge buffers run from internal SRAM on this target.
 
 ## Quick Start
 
 1. Build and flash the firmware.
 2. Open serial monitor at `115200` to read startup logs and IP information.
-3. If no active STA profile exists, or the initial STA connection times out, connect to AP `ESP32S3-UART` / `12345678`.
+3. If no active STA profile exists, or the initial STA connection times out, connect to AP `ESP32C3-UART` / `12345678`.
 4. Visit `http://192.168.4.1/` in AP mode, or `http://<device-ip>/` in STA mode.
 5. Save or activate a Wi-Fi profile from the web page; the firmware reconfigures Wi-Fi immediately.
 
 ## Status LED
 
-- Red: not connected to Wi-Fi and AP is not active
-- Green: Wi-Fi connected, no TCP client
-- Purple: TCP client connected
-- Orange: AP active, no TCP client
-- Blue double flash: UART/TCP data activity
+- Fast blink: not connected to Wi-Fi
+- Slow blink: Wi-Fi connected, no TCP client
+- Solid on: TCP client connected
+- Fast flicker overlay: UART/TCP data activity
 
 ## Network Behavior
 

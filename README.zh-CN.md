@@ -1,9 +1,9 @@
-# ESP32-S3 WiFi UART 桥接器
+# ESP32-C3 WiFi UART 桥接器
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-这是一个基于 PlatformIO 和 Arduino 框架构建的 ESP32-S3 固件项目。
-它将 `UART1` 与 Wi-Fi 上的原始 TCP 套接字进行桥接，并在 `IO48` 上使用一个 WS2812 状态灯。
+这是一个基于 PlatformIO 和 Arduino 框架构建的 ESP32-C3 固件项目。
+它将 `UART1` 与 Wi-Fi 上的原始 TCP 套接字进行桥接，并使用板载 `IO8` 状态灯。
 
 ## 功能特性
 
@@ -11,40 +11,39 @@
 - 提供 Web 配置页面，可管理 UART 参数和 Wi-Fi 配置组
 - UART 帧格式可选：5/6/7/8 数据位、N/E/O 校验位、1/2 停止位
 - 若初始 STA 连接超时，自动回退到 AP 模式
-- 桥接缓冲优先使用 PSRAM，并支持回退到 SRAM
-- `IO48` 上提供 WS2812 状态灯
+- 桥接缓冲优先使用 PSRAM（若可用），并支持回退到 SRAM
+- 使用板载 `IO8` 状态灯
 
 ## 引脚映射
 
-- `UART1 RX = IO13`
-- `UART1 TX = IO14`
+- `UART1 RX = IO3`
+- `UART1 TX = IO4`
 - 接线提醒：`ESP32 RX <- 对端 TX`、`ESP32 TX -> 对端 RX`，并确保共地 `GND`
 
 ## 最低硬件需求
 
-- 芯片：推荐 `ESP32-S3`；理论最低 `ESP32-S3`
+- 板型：`ESP32-C3 SuperMini`
 - SRAM：推荐值取决于流量和负载；理论最低 `>= 256 KB`
 - Flash：推荐 `8 MB` 及以上；理论最低 `>= 4 MB`
 - PSRAM：推荐 `8 MB`；理论最低为可选（缓冲更小、峰值吞吐更低）
 
-该固件已在 **ESP32-S3-WROOM1-N16R8**（16 MB Flash / 8 MB PSRAM）上验证。
-如需适配更小板型，可按需在 `src/main.cpp` 中下调桥接缓冲和 UART 驱动缓冲尺寸。
+当前配置面向 PlatformIO 的 `nologo_esp32c3_super_mini` 板型，默认 `UART1 RX=IO3`、`TX=IO4`，状态灯接在 `IO8`。
+ESP32-C3 板通常不带 PSRAM，因此该目标下桥接缓冲将使用内部 SRAM。
 
 ## 快速开始
 
 1. 构建并烧录固件。
 2. 以 `115200` 打开串口监视器，查看启动日志和 IP 信息。
-3. 若没有可用 STA 配置，或启动时 STA 连接超时，连接 AP：`ESP32S3-UART` / `12345678`。
+3. 若没有可用 STA 配置，或启动时 STA 连接超时，连接 AP：`ESP32C3-UART` / `12345678`。
 4. AP 模式访问 `http://192.168.4.1/`，STA 模式访问 `http://<设备IP>/`。
 5. 在网页中保存或启用 Wi-Fi 配置组后，固件会立即重配 Wi-Fi。
 
 ## 状态灯
 
-- 红：未连接 Wi-Fi 且 AP 未激活
-- 绿：Wi-Fi 已连接，但没有 TCP 客户端
-- 紫：TCP 客户端已连接
-- 橙：AP 已启用，但没有 TCP 客户端
-- 蓝色双闪：UART/TCP 正在传输数据
+- 快闪：未连接 Wi-Fi
+- 慢闪：已连接 Wi-Fi，但没有 TCP 客户端
+- 常亮：TCP 客户端已连接
+- 快速闪烁叠加：UART/TCP 正在传输数据
 
 ## 网络行为
 
