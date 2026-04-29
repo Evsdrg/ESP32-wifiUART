@@ -9,7 +9,7 @@ ESP WiFi UART Bridge 是一个通过 Wi-Fi 暴露 TCP 套接字，并将其桥�
 
 | 分支 | 目标平台 | UART 引脚 | 状态灯 |
 |------|----------|-----------|--------|
-| `ESP32S3` | ESP32-S3 配置 | `RX=IO13`、`TX=IO14` | `IO48` 上的 WS2812 |
+| `ESP32S3` | ESP32-S3 配置 | `RX=IO13`、`TX=IO14` | 通过 Arduino RGB LED 辅助函数驱动 `IO48` 上的 WS2812 |
 | `ESP32C3` | ESP32-C3 SuperMini 配置 | `RX=IO3`、`TX=IO4` | `IO8` 板载 LED |
 
 构建或烧录前，请先切换到与你硬件匹配的分支。
@@ -66,6 +66,8 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 - Wi-Fi 凭据可通过 Web 界面写入，并保存在 NVS Preferences 中
 - 最多支持 24 组 Wi-Fi 配置
 - 缓冲区大小、UART FIFO 阈值、状态灯行为和板级配置会因 `ESP32S3` 与 `ESP32C3` 分支不同而有所区别，这些差异是有意保留的
+- ESP32-S3 分支默认使用静态 SRAM 桥接缓冲区，可通过 `USE_PSRAM_BRIDGE_BUFFERS=1` 切换为 PSRAM 分配
+- ESP32-S3 默认不配置 Wi-Fi 发射功率；如部署环境需要固定功率，可在 `platformio.ini` 中启用 `CONFIGURE_WIFI_TX_POWER=1` 并设置 `WIFI_TX_POWER`
 
 ## 许可证
 

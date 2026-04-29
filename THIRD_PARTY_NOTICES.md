@@ -19,14 +19,6 @@ software that remains under its own licenses.
 - License: `LGPL-2.1-or-later`
 - Local metadata in the build environment: `.platformio/packages/framework-arduinoespressif32-libs/package.json`
 
-### FastLED
-
-- Upstream: <https://github.com/FastLED/FastLED>
-- Package version: `3.10.3`
-- License: `MIT`
-- Local metadata: `.pio/libdeps/esp32s3_120_16_8-qio_opi/FastLED/library.json`
-- Local license file: `.pio/libdeps/esp32s3_120_16_8-qio_opi/FastLED/LICENSE`
-
 ### ESP-IDF components used underneath Arduino-ESP32
 
 - Upstream: <https://github.com/espressif/esp-idf>

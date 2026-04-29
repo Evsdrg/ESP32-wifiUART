@@ -2,7 +2,6 @@
 #include <cinttypes>
 #include <ArduinoJson.h>
 #include <esp32-hal-psram.h>
-#include <FastLED.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -60,8 +59,35 @@ void debugPrintln(const char *message) {
 #define TCP_BRIDGE_PORT 6638
 #endif
 
+#ifndef USE_PSRAM_BRIDGE_BUFFERS
+#define USE_PSRAM_BRIDGE_BUFFERS 0
+#endif
+
+#ifndef CONFIGURE_WIFI_TX_POWER
+#define CONFIGURE_WIFI_TX_POWER 0
+#endif
+
+#ifndef WIFI_TX_POWER
+#define WIFI_TX_POWER WIFI_POWER_8_5dBm
+#endif
+
+#ifndef STATUS_LED_PIN
+#if defined(RGB_BUILTIN)
+#define STATUS_LED_PIN RGB_BUILTIN
+#else
+#define STATUS_LED_PIN 48
+#endif
+#endif
+
+#ifndef STATUS_RGB_BRIGHTNESS
+#define STATUS_RGB_BRIGHTNESS 10
+#endif
+
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 constexpr uint32_t kWifiReconnectIntervalMs = 3000;
+#if CONFIGURE_WIFI_TX_POWER
+constexpr wifi_power_t kWifiTxPower = WIFI_TX_POWER;
+#endif
 constexpr uint32_t kUartBackpressureLogIntervalMs = 2000;
 constexpr uint32_t kStatsLogIntervalMs = 10000;
 constexpr uint32_t kActivityFlashWindowMs = 220;
@@ -75,9 +101,6 @@ constexpr size_t kUartDriverRxBufferSize = 16384;
 constexpr size_t kUartDriverTxBufferSize = 4096;
 constexpr uint8_t kMaxWiFiProfiles = 24;
 constexpr uint16_t kHttpPort = 80;
-constexpr uint8_t kLedBrightness = 10;
-constexpr uint8_t kLedPin = 48;
-constexpr uint8_t kLedCount = 1;
 
 /**
  * @brief UART1 framing and speed settings used by the bridge.
@@ -106,6 +129,12 @@ struct WiFiScanResult {
   int32_t rssi;
   uint8_t channel;
   uint8_t encryption;
+};
+
+struct RgbColor {
+  uint8_t red;
+  uint8_t green;
+  uint8_t blue;
 };
 
 constexpr char kConfigPageHtml[] PROGMEM = R"HTML(
@@ -542,30 +571,52 @@ class ByteRingBuffer {
       return false;
     }
 
+#if USE_PSRAM_BRIDGE_BUFFERS
     data_ = static_cast<uint8_t *>(ps_malloc(capacity));
     usingPsram_ = data_ != nullptr;
+#endif
     if (data_ == nullptr) {
       data_ = static_cast<uint8_t *>(malloc(capacity));
+      usingPsram_ = false;
     }
 
     if (data_ == nullptr) {
       capacity_ = 0;
+      ownsStorage_ = false;
       usingPsram_ = false;
       return false;
     }
 
     capacity_ = capacity;
+    ownsStorage_ = true;
+    clear();
+    return true;
+  }
+
+  [[nodiscard]]
+  bool begin(uint8_t *storage, size_t capacity) {
+    release();
+
+    if (storage == nullptr || capacity == 0) {
+      return false;
+    }
+
+    data_ = storage;
+    capacity_ = capacity;
+    ownsStorage_ = false;
+    usingPsram_ = false;
     clear();
     return true;
   }
 
   void release() {
-    if (data_ != nullptr) {
+    if (ownsStorage_ && data_ != nullptr) {
       free(data_);
-      data_ = nullptr;
     }
 
+    data_ = nullptr;
     capacity_ = 0;
+    ownsStorage_ = false;
     usingPsram_ = false;
     head_ = 0;
     tail_ = 0;
@@ -635,6 +686,7 @@ class ByteRingBuffer {
  private:
   uint8_t *data_ = nullptr;
   size_t capacity_ = 0;
+  bool ownsStorage_ = false;
   bool usingPsram_ = false;
   size_t head_ = 0;
   size_t tail_ = 0;
@@ -646,7 +698,8 @@ WiFiServer TcpServer(TCP_BRIDGE_PORT);
 WiFiClient TcpClient;
 WebServer HttpServer(kHttpPort);
 Preferences PreferencesStore;
-CRGB Leds[kLedCount];
+uint8_t gTcpToUartStorage[kPendingTcpToUartBytes] = {};
+uint8_t gUartToTcpStorage[kPendingUartToTcpBytes] = {};
 ByteRingBuffer gTcpToUartBuffer;
 ByteRingBuffer gUartToTcpBuffer;
 UartSettings gUartSettings = {kUartBaudRate, 8, 'N', 1};
@@ -1280,13 +1333,18 @@ void initHttpServer() {
 
 /**
  * @brief Initialize bridge ring buffers for both data directions.
- * @details Allocation prefers PSRAM and falls back to internal SRAM.
+ * @details Static SRAM is used by default; PSRAM allocation is opt-in via build flags.
  * @retval true Both buffers were allocated successfully.
  * @retval false At least one allocation failed.
  */
 bool initBridgeBuffers() {
+#if USE_PSRAM_BRIDGE_BUFFERS
   const bool tcpToUartReady = gTcpToUartBuffer.begin(kPendingTcpToUartBytes);
   const bool uartToTcpReady = gUartToTcpBuffer.begin(kPendingUartToTcpBytes);
+#else
+  const bool tcpToUartReady = gTcpToUartBuffer.begin(gTcpToUartStorage, sizeof(gTcpToUartStorage));
+  const bool uartToTcpReady = gUartToTcpBuffer.begin(gUartToTcpStorage, sizeof(gUartToTcpStorage));
+#endif
 
   if (!tcpToUartReady || !uartToTcpReady) {
     gTcpToUartBuffer.release();
@@ -1311,19 +1369,24 @@ void markActivity() {
   gLastActivityAtMs = millis();
 }
 
+void writeStatusLedColor(const RgbColor &color) {
+  rgbLedWrite(STATUS_LED_PIN, color.red, color.green, color.blue);
+}
+
 void showStatusLed() {
   const bool wifiConnected = WiFi.status() == WL_CONNECTED;
   const bool accessPointActive = gAccessPointActive;
   const bool tcpClientConnected = isTcpClientConnected();
   const bool wifiScanInProgress = gWifiScanInProgress;
+  constexpr uint8_t brightness = STATUS_RGB_BRIGHTNESS;
 
-  CRGB baseColor = CRGB::Red;
+  RgbColor baseColor = {brightness, 0, 0};
   if (tcpClientConnected) {
-    baseColor = CRGB::Purple;
+    baseColor = {brightness, 0, brightness};
   } else if (wifiConnected) {
-    baseColor = CRGB::Green;
+    baseColor = {0, brightness, 0};
   } else if (accessPointActive) {
-    baseColor = CRGB::Orange;
+    baseColor = {brightness, static_cast<uint8_t>(brightness / 3), 0};
   }
 
   const uint32_t activityAgeMs = millis() - gLastActivityAtMs;
@@ -1335,14 +1398,12 @@ void showStatusLed() {
   const bool scanBlinkOn = (millis() / 180) % 2 == 0;
 
   if (wifiScanInProgress) {
-    Leds[0] = scanBlinkOn ? CRGB::Green : CRGB::Black;
+    writeStatusLedColor(scanBlinkOn ? RgbColor{0, brightness, 0} : RgbColor{0, 0, 0});
   } else if (inActivityWindow) {
-    Leds[0] = (firstPulse || secondPulse) ? CRGB::Blue : CRGB::Black;
+    writeStatusLedColor((firstPulse || secondPulse) ? RgbColor{0, 0, brightness} : RgbColor{0, 0, 0});
   } else {
-    Leds[0] = baseColor;
+    writeStatusLedColor(baseColor);
   }
-
-  FastLED.show();
 }
 
 void stopTcpServer() {
@@ -1730,11 +1791,13 @@ void setup() {
     ESP.restart();
   }
 
-  FastLED.addLeds<WS2812, kLedPin, GRB>(Leds, kLedCount);
-  FastLED.setBrightness(kLedBrightness);
+  writeStatusLedColor({0, 0, 0});
   showStatusLed();
 
   WiFi.setSleep(false);
+#if CONFIGURE_WIFI_TX_POWER
+  WiFi.setTxPower(kWifiTxPower);
+#endif
   if (getActiveWiFiProfile() != nullptr) {
     startStationMode();
     waitForInitialStationConnection();

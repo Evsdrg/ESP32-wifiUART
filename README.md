@@ -9,7 +9,7 @@ The repository keeps target-specific firmware in separate branches so board-leve
 
 | Branch | Target | UART Pins | Status LED |
 |--------|--------|-----------|------------|
-| `ESP32S3` | ESP32-S3 board configuration | `RX=IO13`, `TX=IO14` | WS2812 on `IO48` |
+| `ESP32S3` | ESP32-S3 board configuration | `RX=IO13`, `TX=IO14` | WS2812 on `IO48` via Arduino RGB LED helper |
 | `ESP32C3` | ESP32-C3 SuperMini configuration | `RX=IO3`, `TX=IO4` | Onboard LED on `IO8` |
 
 Check out the branch that matches your hardware before building or flashing.
@@ -66,6 +66,8 @@ Then point your serial software to `/dev/ttyESP32`.
 - Wi-Fi credentials can be provisioned from the web UI and are stored in NVS Preferences
 - Up to 24 Wi-Fi profiles are supported
 - Branch-specific buffer sizes, UART FIFO thresholds, LED behavior, and board settings are intentional and may differ between `ESP32S3` and `ESP32C3`
+- The ESP32-S3 branch uses static SRAM bridge buffers by default and can opt into PSRAM allocation with `USE_PSRAM_BRIDGE_BUFFERS=1`
+- Wi-Fi TX power is not configured by default on ESP32-S3; enable `CONFIGURE_WIFI_TX_POWER=1` and set `WIFI_TX_POWER` in `platformio.ini` if your deployment needs an explicit power level
 
 ## License
 
