@@ -68,7 +68,23 @@ Then point your serial software to `/dev/ttyESP32`.
 - Up to 24 Wi-Fi profiles are supported
 - Branch-specific buffer sizes, UART FIFO thresholds, LED behavior, and board settings are intentional and may differ between `ESP32S3`, `ESP32C3`, and `ESP32C6`
 
-## ESP32-C6 Notes
+## Board Notes
+
+### ESP32-S3
+
+- The `ESP32S3` branch targets an ESP32-S3 board with the PlatformIO board ID `esp32s3_120_16_8-qio_opi`
+- Default UART pins are `RX=IO13` and `TX=IO14`; adjust `UART1_RX_PIN` and `UART1_TX_PIN` in `platformio.ini` if your wiring differs
+- The status LED is a WS2812 RGB LED on `IO48`, driven with FastLED
+- The S3 build uses larger bridge buffers and prefers PSRAM allocation when available, falling back to internal SRAM
+
+### ESP32-C3
+
+- The `ESP32C3` branch targets Nologo ESP32-C3 SuperMini with the PlatformIO board ID `nologo_esp32c3_super_mini`
+- Default UART pins are `RX=IO3` and `TX=IO4`; adjust `UART1_RX_PIN` and `UART1_TX_PIN` in `platformio.ini` if your wiring differs
+- The status LED is the onboard single-color LED on `IO8`, configured as active-low
+- The C3 build uses fixed static SRAM bridge buffers for predictable long-running behavior on boards without PSRAM
+
+### ESP32-C6
 
 - The `ESP32C6` branch targets Espressif ESP32-C6-DevKitC-1 with the PlatformIO board ID `esp32-c6-devkitc-1`
 - Default UART pins are `RX=IO4` and `TX=IO5`; adjust `UART1_RX_PIN` and `UART1_TX_PIN` in `platformio.ini` if your wiring differs

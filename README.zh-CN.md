@@ -68,7 +68,23 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 - 最多支持 24 组 Wi-Fi 配置
 - 缓冲区大小、UART FIFO 阈值、状态灯行为和板级配置会因 `ESP32S3`、`ESP32C3` 与 `ESP32C6` 分支不同而有所区别，这些差异是有意保留的
 
-## ESP32-C6 说明
+## 开发板说明
+
+### ESP32-S3
+
+- `ESP32S3` 分支面向一款 ESP32-S3 开发板，PlatformIO 板卡 ID 为 `esp32s3_120_16_8-qio_opi`
+- 默认 UART 引脚为 `RX=IO13`、`TX=IO14`；如果接线不同，可在 `platformio.ini` 中调整 `UART1_RX_PIN` 和 `UART1_TX_PIN`
+- 状态灯是 `IO48` 上的 WS2812 RGB LED，使用 FastLED 驱动
+- S3 构建使用更大的桥接缓冲区，并在可用时优先使用 PSRAM，失败后回退到内部 SRAM
+
+### ESP32-C3
+
+- `ESP32C3` 分支面向 Nologo ESP32-C3 SuperMini，PlatformIO 板卡 ID 为 `nologo_esp32c3_super_mini`
+- 默认 UART 引脚为 `RX=IO3`、`TX=IO4`；如果接线不同，可在 `platformio.ini` 中调整 `UART1_RX_PIN` 和 `UART1_TX_PIN`
+- 状态灯是 `IO8` 上的板载单色 LED，配置为低电平有效
+- C3 构建使用固定静态 SRAM 桥接缓冲区，适合不带 PSRAM 的开发板长期稳定运行
+
+### ESP32-C6
 
 - `ESP32C6` 分支面向 Espressif ESP32-C6-DevKitC-1，PlatformIO 板卡 ID 为 `esp32-c6-devkitc-1`
 - 默认 UART 引脚为 `RX=IO4`、`TX=IO5`；如果接线不同，可在 `platformio.ini` 中调整 `UART1_RX_PIN` 和 `UART1_TX_PIN`
