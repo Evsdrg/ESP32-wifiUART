@@ -78,9 +78,19 @@ void debugPrintln(const char *message) {
 #define TCP_BRIDGE_PORT 6638
 #endif
 
+#ifndef CONFIGURE_WIFI_TX_POWER
+#define CONFIGURE_WIFI_TX_POWER 0
+#endif
+
+#ifndef WIFI_TX_POWER
+#define WIFI_TX_POWER WIFI_POWER_8_5dBm
+#endif
+
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 constexpr uint32_t kWifiReconnectIntervalMs = 3000;
-constexpr wifi_power_t kWifiTxPower = WIFI_POWER_8_5dBm;
+#if CONFIGURE_WIFI_TX_POWER
+constexpr wifi_power_t kWifiTxPower = WIFI_TX_POWER;
+#endif
 constexpr uint32_t kUartBackpressureLogIntervalMs = 2000;
 constexpr uint32_t kStatsLogIntervalMs = 10000;
 constexpr uint32_t kDisconnectedBlinkPeriodMs = 140;
@@ -1843,7 +1853,9 @@ void setup() {
   showStatusLed();
 
   WiFi.setSleep(false);
+#if CONFIGURE_WIFI_TX_POWER
   WiFi.setTxPower(kWifiTxPower);
+#endif
   if (getActiveWiFiProfile() != nullptr) {
     startStationMode();
     waitForInitialStationConnection();

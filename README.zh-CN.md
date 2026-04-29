@@ -91,6 +91,7 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 - `IO8` 上的板载可寻址 RGB LED 参考 ESP32-S3 分支的状态颜色：断网红色、AP 模式橙色、STA 已连接绿色、TCP 已连接紫色、数据活动蓝色脉冲、Wi-Fi 扫描时绿色闪烁
 - ESP32-C6 对普通应用暴露 1 个 FreeRTOS 主核，另有 1 个 LP core。LP core 适合低功耗唤醒和简单监测，不适合运行 Arduino 任务或分担 TCP/UART 桥接
 - 桥接缓冲区沿用 ESP32-C3 的静态 SRAM 模型，因为常见 ESP32-C6-DevKitC-1 板卡不带 PSRAM
+- ESP32-C6 默认不配置 Wi-Fi 发射功率；如部署环境需要固定功率，可在 `platformio.ini` 中启用 `CONFIGURE_WIFI_TX_POWER=1` 并设置 `WIFI_TX_POWER`
 
 ## 许可证
 

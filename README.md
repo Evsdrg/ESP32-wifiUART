@@ -91,6 +91,7 @@ Then point your serial software to `/dev/ttyESP32`.
 - The onboard addressable RGB LED on `IO8` follows the ESP32-S3 status color scheme: red for disconnected, orange for AP mode, green for STA connected, purple for TCP connected, blue pulses for data activity, and green blinking during Wi-Fi scans
 - ESP32-C6 exposes one FreeRTOS application core plus an LP core. The LP core is for low-power wake and simple monitoring workflows, not for running Arduino tasks or offloading the TCP/UART bridge
 - The bridge buffers intentionally follow the ESP32-C3 static SRAM model because common ESP32-C6-DevKitC-1 boards do not provide PSRAM
+- Wi-Fi TX power is not configured by default on ESP32-C6; enable `CONFIGURE_WIFI_TX_POWER=1` and set `WIFI_TX_POWER` in `platformio.ini` if your deployment needs an explicit power level
 
 ## License
 
