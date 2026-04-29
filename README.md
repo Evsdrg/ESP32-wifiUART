@@ -85,7 +85,8 @@ Then point your serial software to `/dev/ttyESP32`.
 - The status LED is the onboard single-color LED on `IO8`, configured as active-low
 - The C3 build uses fixed static SRAM bridge buffers for predictable long-running behavior on boards without PSRAM
 - Wi-Fi TX power is limited by default with `WIFI_POWER_8_5dBm`; this is intentional for typical C3 SuperMini boards to reduce heat and power draw and improve long-running stability
-- If an ESP32-C3 SuperMini cannot connect to Wi-Fi, or if its fallback AP cannot be seen by nearby devices, inspect the original onboard antenna. On problematic boards, removing the original antenna and using a better external antenna path may be necessary
+- Wi-Fi signal issues are common on black-PCB ESP32-C3 SuperMini boards. If the board cannot connect to Wi-Fi, or if its fallback AP cannot be seen by nearby devices, removing the original onboard antenna will usually make the device work again
+- Removing the original antenna can make the signal strongly directional. It is acceptable for temporary use, but for long-term deployments, prefer another development board with a more reasonable antenna design
 
 ### ESP32-C6
 
