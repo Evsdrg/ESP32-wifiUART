@@ -9,7 +9,7 @@ ESP WiFi UART Bridge 是一个通过 Wi-Fi 暴露 TCP 套接字，并将其桥�
 
 | 分支 | 目标平台 | UART 引脚 | 状态灯 |
 |------|----------|-----------|--------|
-| `ESP32S3` | ESP32-S3 配置 | `RX=IO13`、`TX=IO14` | `IO48` 上的 WS2812 |
+| `ESP32S3` | ESP32-S3 配置 | `RX=IO13`、`TX=IO14` | 通过 Arduino RGB LED 辅助函数驱动 `IO48` 上的 WS2812 |
 | `ESP32C3` | ESP32-C3 SuperMini 配置 | `RX=IO3`、`TX=IO4` | `IO8` 板载 LED |
 | `ESP32C6` | Espressif ESP32-C6-DevKitC-1 配置 | `RX=IO18`、`TX=IO9` | `IO8` 上的可寻址 RGB LED |
 
@@ -74,15 +74,18 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 
 - `ESP32S3` 分支面向一款 ESP32-S3 开发板，PlatformIO 板卡 ID 为 `esp32s3_120_16_8-qio_opi`
 - 默认 UART 引脚为 `RX=IO13`、`TX=IO14`；如果接线不同，可在 `platformio.ini` 中调整 `UART1_RX_PIN` 和 `UART1_TX_PIN`
-- 状态灯是 `IO48` 上的 WS2812 RGB LED，使用 FastLED 驱动
-- S3 构建使用更大的桥接缓冲区，并在可用时优先使用 PSRAM，失败后回退到内部 SRAM
+- 状态灯是 `IO48` 上的 WS2812 RGB LED，通过 Arduino-ESP32 RGB LED 辅助函数驱动，不依赖 FastLED
+- ESP32-S3 分支默认使用静态 SRAM 桥接缓冲区，可通过 `USE_PSRAM_BRIDGE_BUFFERS=1` 切换为 PSRAM 分配
+- ESP32-S3 默认不配置 Wi-Fi 发射功率；如部署环境需要固定功率，可在 `platformio.ini` 中启用 `CONFIGURE_WIFI_TX_POWER=1` 并设置 `WIFI_TX_POWER`
 
 ### ESP32-C3
 
-- `ESP32C3` 分支面向 Nologo ESP32-C3 SuperMini，PlatformIO 板卡 ID 为 `nologo_esp32c3_super_mini`
+- `ESP32C3` 分支面向常见 ESP32-C3 SuperMini 开发板，PlatformIO 板卡 ID 为 `nologo_esp32c3_super_mini`
 - 默认 UART 引脚为 `RX=IO3`、`TX=IO4`；如果接线不同，可在 `platformio.ini` 中调整 `UART1_RX_PIN` 和 `UART1_TX_PIN`
 - 状态灯是 `IO8` 上的板载单色 LED，配置为低电平有效
 - C3 构建使用固定静态 SRAM 桥接缓冲区，适合不带 PSRAM 的开发板长期稳定运行
+- Wi-Fi 发射功率默认限制为 `WIFI_POWER_8_5dBm`；这是针对常见 C3 SuperMini 开发板的有意配置，用于降低发热和功耗，并提升长期运行稳定性
+- 如果 ESP32-C3 SuperMini 无法连接 Wi-Fi，或附近设备看不到固件回退创建的 AP 信号，请检查原装板载天线。对于有问题的板卡，可能需要拆掉原装天线，并改用更可靠的外置天线路径
 
 ### ESP32-C6
 
