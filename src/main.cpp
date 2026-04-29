@@ -39,7 +39,19 @@ void debugPrintln(const char *message) {
 #endif
 
 #ifndef STATUS_LED_PIN
+#if defined(RGB_BUILTIN)
+#define STATUS_LED_PIN RGB_BUILTIN
+#else
 #define STATUS_LED_PIN 8
+#endif
+#endif
+
+#ifndef USE_RGB_STATUS_LED
+#define USE_RGB_STATUS_LED 0
+#endif
+
+#ifndef STATUS_RGB_BRIGHTNESS
+#define STATUS_RGB_BRIGHTNESS 16
 #endif
 
 #ifndef STATUS_LED_ACTIVE_LEVEL
@@ -55,7 +67,7 @@ void debugPrintln(const char *message) {
 #endif
 
 #ifndef AP_SSID
-#define AP_SSID "ESP32C3-UART"
+#define AP_SSID "ESP32C6-UART"
 #endif
 
 #ifndef AP_PASSWORD
@@ -74,6 +86,9 @@ constexpr uint32_t kStatsLogIntervalMs = 10000;
 constexpr uint32_t kDisconnectedBlinkPeriodMs = 140;
 constexpr uint32_t kWifiBlinkPeriodMs = 700;
 constexpr uint32_t kDataFlashWindowMs = 120;
+constexpr uint32_t kActivityFlashWindowMs = 220;
+constexpr uint32_t kActivityPulseMs = 45;
+constexpr uint32_t kActivityPulseGapMs = 55;
 constexpr uint8_t kUartRxFifoFullThreshold = 112;
 constexpr size_t kIoChunkSize = 256;
 constexpr size_t kPendingTcpToUartBytes = 12288;
@@ -112,13 +127,19 @@ struct WiFiScanResult {
   uint8_t encryption;
 };
 
+struct RgbColor {
+  uint8_t red;
+  uint8_t green;
+  uint8_t blue;
+};
+
 constexpr char kConfigPageHtml[] PROGMEM = R"HTML(
 <!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>ESP32-C3 串口配置</title>
+  <title>ESP32-C6 串口配置</title>
   <style>
     :root { color-scheme: dark; }
     body { font-family: Arial, sans-serif; margin: 0; background: #111827; color: #e5e7eb; }
@@ -159,7 +180,7 @@ constexpr char kConfigPageHtml[] PROGMEM = R"HTML(
 </head>
 <body>
   <main>
-    <h1>ESP32-C3 串口桥控制台</h1>
+    <h1>ESP32-C6 串口桥控制台</h1>
     <p>查看并修改 TCP 串口桥当前使用的 UART1 参数。</p>
     <section class="card">
       <form id="uart-form">
@@ -700,9 +721,31 @@ void clearSessionBuffers();
 void showStatusLed();
 
 void writeStatusLed(bool on) {
+#if USE_RGB_STATUS_LED
+  const uint8_t brightness = on ? STATUS_RGB_BRIGHTNESS : 0;
+  rgbLedWrite(STATUS_LED_PIN, 0, brightness, 0);
+#else
   const int activeLevel = STATUS_LED_ACTIVE_LEVEL ? HIGH : LOW;
   const int inactiveLevel = STATUS_LED_ACTIVE_LEVEL ? LOW : HIGH;
   digitalWrite(STATUS_LED_PIN, on ? activeLevel : inactiveLevel);
+#endif
+}
+
+void writeStatusLedColor(const RgbColor &color) {
+#if USE_RGB_STATUS_LED
+  rgbLedWrite(STATUS_LED_PIN, color.red, color.green, color.blue);
+#else
+  writeStatusLed(color.red != 0 || color.green != 0 || color.blue != 0);
+#endif
+}
+
+void initStatusLed() {
+#if USE_RGB_STATUS_LED
+  writeStatusLed(false);
+#else
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  writeStatusLed(false);
+#endif
 }
 
 void sendJsonDocument(int statusCode, JsonDocument &doc) {
@@ -1321,7 +1364,7 @@ void initHttpServer() {
 
 /**
  * @brief Initialize bridge ring buffers for both data directions.
- * @details The C3 build binds both ring buffers to fixed static storage for long-run determinism.
+ * @details The C6 build binds both ring buffers to fixed static storage for long-run determinism.
  * @retval true Both buffers were allocated successfully.
  * @retval false At least one allocation failed.
  */
@@ -1353,6 +1396,38 @@ void markActivity() {
 }
 
 void showStatusLed() {
+#if USE_RGB_STATUS_LED
+  const bool wifiConnected = WiFi.status() == WL_CONNECTED;
+  const bool accessPointActive = gAccessPointActive;
+  const bool tcpClientConnected = isTcpClientConnected();
+  const bool wifiScanInProgress = gWifiScanInProgress;
+  constexpr uint8_t brightness = STATUS_RGB_BRIGHTNESS;
+
+  RgbColor baseColor = {brightness, 0, 0};
+  if (tcpClientConnected) {
+    baseColor = {brightness, 0, brightness};
+  } else if (wifiConnected) {
+    baseColor = {0, brightness, 0};
+  } else if (accessPointActive) {
+    baseColor = {brightness, static_cast<uint8_t>(brightness / 3), 0};
+  }
+
+  const uint32_t activityAgeMs = millis() - gLastActivityAtMs;
+  const bool inActivityWindow = activityAgeMs <= kActivityFlashWindowMs;
+  const bool firstPulse = activityAgeMs < kActivityPulseMs;
+  const bool secondPulse =
+      activityAgeMs >= (kActivityPulseMs + kActivityPulseGapMs) &&
+      activityAgeMs < (2 * kActivityPulseMs + kActivityPulseGapMs);
+  const bool scanBlinkOn = (millis() / 180) % 2 == 0;
+
+  if (wifiScanInProgress) {
+    writeStatusLedColor(scanBlinkOn ? RgbColor{0, brightness, 0} : RgbColor{0, 0, 0});
+  } else if (inActivityWindow) {
+    writeStatusLedColor((firstPulse || secondPulse) ? RgbColor{0, 0, brightness} : RgbColor{0, 0, 0});
+  } else {
+    writeStatusLedColor(baseColor);
+  }
+#else
   const bool wifiConnected = WiFi.status() == WL_CONNECTED;
   const bool tcpClientConnected = isTcpClientConnected();
   const uint32_t activityAgeMs = millis() - gLastActivityAtMs;
@@ -1370,6 +1445,7 @@ void showStatusLed() {
   }
 
   writeStatusLed(ledOn);
+#endif
 }
 
 void stopTcpServer() {
@@ -1763,7 +1839,7 @@ void setup() {
     ESP.restart();
   }
 
-  pinMode(STATUS_LED_PIN, OUTPUT);
+  initStatusLed();
   showStatusLed();
 
   WiFi.setSleep(false);
