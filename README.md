@@ -67,6 +67,12 @@ Then point your serial software to `/dev/ttyESP32`.
 - Up to 24 Wi-Fi profiles are supported
 - Branch-specific buffer sizes, UART FIFO thresholds, LED behavior, and board settings are intentional and may differ between `ESP32S3` and `ESP32C3`
 
+## ESP32-C3 Notes
+
+- The `ESP32C3` branch targets common ESP32-C3 SuperMini boards with the PlatformIO board ID `nologo_esp32c3_super_mini`
+- Wi-Fi TX power is limited by default with `WIFI_POWER_8_5dBm`; this is intentional for typical C3 SuperMini boards to reduce heat and power draw and improve long-running stability
+- If an ESP32-C3 SuperMini cannot connect to Wi-Fi, or if its fallback AP cannot be seen by nearby devices, inspect the original onboard antenna. On problematic boards, removing the original antenna and using a better external antenna path may be necessary
+
 ## License
 
 This project is licensed under the GNU General Public License v3.0.

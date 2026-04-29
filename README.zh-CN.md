@@ -67,6 +67,12 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 - 最多支持 24 组 Wi-Fi 配置
 - 缓冲区大小、UART FIFO 阈值、状态灯行为和板级配置会因 `ESP32S3` 与 `ESP32C3` 分支不同而有所区别，这些差异是有意保留的
 
+## ESP32-C3 说明
+
+- `ESP32C3` 分支面向常见 ESP32-C3 SuperMini 开发板，PlatformIO 板卡 ID 为 `nologo_esp32c3_super_mini`
+- Wi-Fi 发射功率默认限制为 `WIFI_POWER_8_5dBm`；这是针对常见 C3 SuperMini 开发板的有意配置，用于降低发热和功耗，并提升长期运行稳定性
+- 如果 ESP32-C3 SuperMini 无法连接 Wi-Fi，或附近设备看不到固件回退创建的 AP 信号，请检查原装板载天线。对于有问题的板卡，可能需要拆掉原装天线，并改用更可靠的外置天线路径
+
 ## 许可证
 
 本项目采用 GNU General Public License v3.0 开源许可。
