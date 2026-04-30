@@ -89,7 +89,20 @@ constexpr uint32_t kDataFlashWindowMs = 120;
 constexpr uint32_t kActivityFlashWindowMs = 220;
 constexpr uint32_t kActivityPulseMs = 45;
 constexpr uint32_t kActivityPulseGapMs = 55;
-constexpr uint8_t kUartRxFifoFullThreshold = 112;
+/**
+ * @brief UART RX FIFO 满阈值
+ *
+ * 控制 UART RX 中断触发频率。ESP32 UART FIFO 128 字节。
+ * 阈值越大中断越少但单次处理数据越多。
+ *
+ * 平台可通过 build_flags 覆盖：
+ *   -DUART_FIFO_THRESHOLD=16   (LOW:   115200下1.4ms延迟,9600高速响应)
+ *   -DUART_FIFO_THRESHOLD=32   (MID:   115200下2.8ms延迟/360Hz中断,460800可接受)
+ *   -DUART_FIFO_THRESHOLD=96   (HIGH:  460800下480Hz/2.1ms,921600下960Hz/1ms)
+ */
+#ifndef UART_FIFO_THRESHOLD
+#define UART_FIFO_THRESHOLD 112
+#endif
 constexpr size_t kIoChunkSize = 256;
 constexpr size_t kPendingTcpToUartBytes = 12288;
 constexpr size_t kPendingUartToTcpBytes = 20480;

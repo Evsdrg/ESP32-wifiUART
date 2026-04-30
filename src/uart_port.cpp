@@ -144,7 +144,7 @@ bool applySettings(const UartSettings &settings) {
       UART1_TX_PIN,
       false,       // invert（不翻转信号极性）
       20000UL,     // timeout（等待 FIFO 排空前最多等 20ms）
-      kUartRxFifoFullThreshold);  // RX FIFO 满阈值（调控流控）
+      UART_FIFO_THRESHOLD);  // RX FIFO 满阈值（平台可配置档位）
 
   uartPort.setTimeout(0);  // readBytes() 立即返回，不阻塞等待
   currentSettings = settings;
