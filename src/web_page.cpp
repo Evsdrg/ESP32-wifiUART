@@ -1,3 +1,11 @@
+/**
+ * @file   web_page.cpp
+ * @brief  配置网页内容（嵌入式 HTML/CSS/JavaScript）
+ *
+ * 页面包含：UART 参数配置表单、Wi-Fi Profile 管理、附近热点扫描。
+ * SSID 输出使用 escapeHtml() 转义，防止 XSS 注入。
+ */
+
 #include "web_page.h"
 
 namespace wifi_uart {
@@ -158,6 +166,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
     </div>
   </div>
   <script>
+    // DOM 元素缓存，避免重复查询
     const form = document.getElementById('uart-form');
     const statusEl = document.getElementById('status');
     const currentEl = document.getElementById('current');
@@ -178,6 +187,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
     const helpModalCloseEl = document.getElementById('help-modal-close');
     const commonBaudRates = ['9600', '19200', '38400', '57600', '115200', '230400', '460800', '921600'];
 
+    // 初始化 24 个 Profile 槽位下拉选项
     for (let i = 0; i < 24; i += 1) {
       const option = document.createElement('option');
       option.value = String(i);
@@ -185,6 +195,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       slotSelect.appendChild(option);
     }
 
+    // 将当前 UART 参数渲染到表单显示区
     function renderCurrent(data) {
       currentEl.textContent =
         `波特率: ${data.baudRate} | 数据位: ${data.dataBits} | 校验位: ${data.parity} | 停止位: ${data.stopBits}`;
@@ -195,17 +206,20 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       form.stopBits.value = String(data.stopBits);
     }
 
+    // 下拉选择变化时同步到手动输入框
     baudRatePresetEl.addEventListener('change', () => {
       if (baudRatePresetEl.value !== 'custom') {
         form.baudRate.value = baudRatePresetEl.value;
       }
     });
 
+    // 手动输入时同步下拉框为"自定义"（若不是常用值）
     form.baudRate.addEventListener('input', () => {
       const baudRate = String(form.baudRate.value);
       baudRatePresetEl.value = commonBaudRates.includes(baudRate) ? baudRate : 'custom';
     });
 
+    // 帮助弹窗控制
     function openHelpModal(title, text) {
       helpModalTitleEl.textContent = title;
       helpModalTextEl.textContent = text;
@@ -227,17 +241,20 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
     });
 
     helpModalCloseEl.addEventListener('click', closeHelpModal);
+    // 点击遮罩层也可关闭
     helpModalEl.addEventListener('click', (event) => {
       if (event.target === helpModalEl) {
         closeHelpModal();
       }
     });
+    // ESC 键关闭弹窗
     window.addEventListener('keydown', (event) => {
       if (event.key === 'Escape' && helpModalEl.classList.contains('open')) {
         closeHelpModal();
       }
     });
 
+    // 从设备获取当前 UART 参数并渲染到表单
     async function refresh() {
       const response = await fetch('/api/uart');
       if (!response.ok) {
@@ -247,6 +264,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       renderCurrent(data);
     }
 
+    // HTML 转义表：防止 XSS 注入（SSID/密码等用户内容必须转义）
     const htmlEscapes = {
       '&': '&amp;',
       '<': '&lt;',
@@ -255,10 +273,12 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       "'": '&#39;',
     };
 
+    // 对任意字符串进行 HTML 安全转义
     function escapeHtml(value) {
       return String(value).replace(/[&<>"']/g, (char) => htmlEscapes[char]);
     }
 
+    // 生成单个 Profile 卡片的 HTML 字符串（SSID 经转义）
     function profileCard(profile) {
       const active = profile.active ? '当前启用' : '已保存';
       const index = escapeHtml(profile.index);
@@ -274,6 +294,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
         </div>`;
     }
 
+    // 渲染 Wi-Fi 状态与 Profile 列表
     function renderWiFi(data) {
       const modeText = data.apActive ? 'AP 模式' : (data.connected ? 'STA 模式' : '空闲');
       const activeText = data.activeIndex >= 0 ? `槽位 ${data.activeIndex}` : '无';
