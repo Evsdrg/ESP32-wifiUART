@@ -1,3 +1,17 @@
+/**
+ * @file   http_server.cpp
+ * @brief  HTTP 服务器实现
+ *
+ * 提供：
+ * - GET / : 嵌入式配置网页（HTML）
+ * - RESTful JSON API：Wi-Fi Profile 管理、UART 参数配置、Wi-Fi 扫描
+ *
+ * Wi-Fi 变更操作（保存/激活/删除 Profile）并不立即执行，
+ * 而是通过 requestReconfigure() 标记 pendingReconfigure=true，
+ * 由主循环中的 applyPendingReconfigureIfNeeded() 统一下发，
+ * 避免在 HTTP handler 中直接操作 Wi-Fi 栈导致的死锁或异常。
+ */
+
 #include "http_server.h"
 #include "app_config.h"
 #include "debug_log.h"
@@ -16,18 +30,33 @@ namespace {
 
 WebServer server(kHttpPort);
 
+/**
+ * @brief 发送 JSON 响应
+ * @param statusCode HTTP 状态码
+ * @param doc        ArduinoJson 文档（由调用者管理生命周期）
+ */
 void sendJsonDocument(int statusCode, JsonDocument &doc) {
   String response;
   serializeJson(doc, response);
   server.send(statusCode, "application/json", response);
 }
 
+/**
+ * @brief 发送 JSON 错误响应
+ * @param statusCode HTTP 状态码
+ * @param message     错误描述字符串
+ */
 void sendJsonError(int statusCode, const String &message) {
   JsonDocument doc;
   doc["error"] = message;
   sendJsonDocument(statusCode, doc);
 }
 
+/**
+ * @brief 向 JSON 文档填充 Wi-Fi Profile 信息
+ *
+ * 包含：激活索引、连接状态、AP 状态、IP、SSID、以及所有已用槽位列表。
+ */
 void addWiFiProfilesJson(JsonDocument &doc) {
   const bool wifiConnected = wifi_manager::wifiConnected();
   doc["activeIndex"] = wifi_profiles::activeIndex();
@@ -35,8 +64,8 @@ void addWiFiProfilesJson(JsonDocument &doc) {
   doc["apActive"] = wifi_manager::accessPointActive();
   doc["connectedSsid"] = wifi_manager::connectedSsid();
   doc["ip"] = wifi_manager::ipAddress();
-  JsonArray profiles = doc["profiles"].to<JsonArray>();
 
+  JsonArray profiles = doc["profiles"].to<JsonArray>();
   for (uint8_t i = 0; i < kMaxWiFiProfiles; ++i) {
     if (!wifi_profiles::profileInUse(i)) {
       continue;
@@ -49,6 +78,7 @@ void addWiFiProfilesJson(JsonDocument &doc) {
   }
 }
 
+/** @brief 向 JSON 文档填充最近一次 Wi-Fi 扫描结果 */
 void addWiFiScanResultsJson(JsonDocument &doc) {
   JsonArray networks = doc["networks"].to<JsonArray>();
   for (size_t i = 0; i < wifi_manager::scanResultCount(); ++i) {
@@ -62,6 +92,7 @@ void addWiFiScanResultsJson(JsonDocument &doc) {
   }
 }
 
+/** @brief 向 JSON 文档填充当前 UART 参数 */
 void addUartSettingsJson(JsonDocument &doc) {
   const UartSettings &settings = uart_port::settings();
   doc["baudRate"] = settings.baudRate;
@@ -71,6 +102,16 @@ void addUartSettingsJson(JsonDocument &doc) {
   doc["stopBits"] = settings.stopBits;
 }
 
+/**
+ * @brief 从 HTTP 请求参数解析 UART 设置
+ *
+ * 校验范围：baudRate >= 300，dataBits 5-8，parity 单字符，stopBits 1 或 2。
+ * 同时验证参数组合是否可被 mapUartConfig 接受。
+ *
+ * @param settings 输出：解析后的 UART 参数
+ * @param error   输出：错误描述
+ * @return true 解析成功
+ */
 bool parseUartSettingsFromRequest(UartSettings &settings, String &error) {
   if (!server.hasArg("baudRate") || !server.hasArg("dataBits") ||
       !server.hasArg("parity") || !server.hasArg("stopBits")) {
@@ -103,6 +144,13 @@ bool parseUartSettingsFromRequest(UartSettings &settings, String &error) {
   return true;
 }
 
+/**
+ * @brief 从 HTTP 请求参数解析 Profile 槽位编号
+ *
+ * @param index 输出：槽位编号
+ * @param error 输出：错误描述
+ * @return true 解析成功
+ */
 bool parseProfileIndexArg(uint8_t &index, String &error) {
   if (!server.hasArg("index")) {
     error = "Missing profile index";
@@ -119,22 +167,30 @@ bool parseProfileIndexArg(uint8_t &index, String &error) {
   return true;
 }
 
+/** @brief GET / : 返回嵌入式配置网页 */
 void handleConfigPage() {
   server.send(200, "text/html; charset=utf-8", FPSTR(kConfigPageHtml));
 }
 
+/** @brief GET /api/wifi : 返回 Wi-Fi 状态及 Profile 列表 */
 void handleGetWiFiProfiles() {
   JsonDocument doc;
   addWiFiProfilesJson(doc);
   sendJsonDocument(200, doc);
 }
 
+/** @brief GET /api/uart : 返回当前 UART 参数 */
 void handleGetUartSettings() {
   JsonDocument doc;
   addUartSettingsJson(doc);
   sendJsonDocument(200, doc);
 }
 
+/**
+ * @brief POST /api/uart : 应用新 UART 参数
+ *
+ * 解析请求参数 → 校验合法性 → 调用 applySettings → 返回新参数。
+ */
 void handleSetUartSettings() {
   UartSettings requested = uart_port::settings();
   String error;
@@ -153,6 +209,11 @@ void handleSetUartSettings() {
   sendJsonDocument(200, doc);
 }
 
+/**
+ * @brief POST /api/wifi/save : 保存凭据到指定槽位
+ *
+ * 若请求中 activate=1，同时切换激活槽位并触发 Wi-Fi 重配置。
+ */
 void handleSaveWiFiProfile() {
   uint8_t index = 0;
   String error;
@@ -172,6 +233,7 @@ void handleSaveWiFiProfile() {
     return;
   }
 
+  // 密码为空时保留原槽位密码（渐进式修改）
   String password = server.arg("password");
   if (password.isEmpty() && wifi_profiles::profileInUse(index)) {
     password = wifi_profiles::profile(index).password;
@@ -184,7 +246,7 @@ void handleSaveWiFiProfile() {
 
   if (server.arg("activate") == "1") {
     wifi_profiles::setActiveIndex(static_cast<int8_t>(index));
-    wifi_manager::requestReconfigure();
+    wifi_manager::requestReconfigure();  // 标记，等待主 loop 执行
   }
 
   JsonDocument doc;
@@ -192,6 +254,11 @@ void handleSaveWiFiProfile() {
   sendJsonDocument(200, doc);
 }
 
+/**
+ * @brief POST /api/wifi/activate : 激活指定槽位 Profile
+ *
+ * 激活后立即触发 Wi-Fi 重配置（标记方式，非立即执行）。
+ */
 void handleActivateWiFiProfile() {
   uint8_t index = 0;
   String error;
@@ -211,6 +278,11 @@ void handleActivateWiFiProfile() {
   sendJsonDocument(200, doc);
 }
 
+/**
+ * @brief POST /api/wifi/delete : 删除指定槽位 Profile
+ *
+ * 若删除的是当前激活槽位，触发 Wi-Fi 重配置（切换到 AP fallback）。
+ */
 void handleDeleteWiFiProfile() {
   uint8_t index = 0;
   String error;
@@ -235,6 +307,7 @@ void handleDeleteWiFiProfile() {
   sendJsonDocument(200, doc);
 }
 
+/** @brief POST /api/wifi/scan : 触发 Wi-Fi 扫描并返回结果 */
 void handleScanWiFi() {
   wifi_manager::scanNearby();
   JsonDocument doc;
@@ -242,6 +315,7 @@ void handleScanWiFi() {
   sendJsonDocument(200, doc);
 }
 
+/** @brief 处理所有未匹配路由：返回 404 JSON 错误 */
 void handleNotFound() {
   sendJsonError(404, "Not found");
 }
@@ -249,6 +323,7 @@ void handleNotFound() {
 }  // namespace
 
 void begin() {
+  // 注册所有路由
   server.on("/", HTTP_GET, handleConfigPage);
   server.on("/api/wifi", HTTP_GET, handleGetWiFiProfiles);
   server.on("/api/wifi/scan", HTTP_POST, handleScanWiFi);
@@ -258,6 +333,7 @@ void begin() {
   server.on("/api/uart", HTTP_GET, handleGetUartSettings);
   server.on("/api/uart", HTTP_POST, handleSetUartSettings);
   server.onNotFound(handleNotFound);
+
   server.begin();
   debugPrintf("HTTP config page listening on port %u\n", kHttpPort);
 }
