@@ -11,7 +11,7 @@ ESP WiFi UART Bridge 是一个通过 Wi-Fi 暴露 TCP 套接字，并将其桥�
 |------|----------|-----------|--------|
 | `ESP32S3` | ESP32-S3 配置 | `RX=IO13`、`TX=IO14` | 通过 Arduino RGB LED 辅助函数驱动 `IO48` 上的 WS2812 |
 | `ESP32C3` | ESP32-C3 SuperMini 配置 | `RX=IO3`、`TX=IO4` | `IO8` 板载 LED |
-| `ESP32C6` | Espressif ESP32-C6-DevKitC-1 配置 | `RX=IO18`、`TX=IO9` | `IO8` 上的可寻址 RGB LED |
+| `ESP32C6` | Espressif ESP32-C6-DevKitC-1 配置 | `RX=IO10`、`TX=IO11` | `IO8` 上的可寻址 RGB LED |
 
 构建或烧录前，请先切换到与你硬件匹配的分支。
 
@@ -91,7 +91,7 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 ### ESP32-C6
 
 - `ESP32C6` 分支面向 Espressif ESP32-C6-DevKitC-1，PlatformIO 板卡 ID 为 `esp32-c6-devkitc-1`
-- 默认 UART 引脚为 `RX=IO18`、`TX=IO9`；如果接线不同，可在 `platformio.ini` 中调整 `UART1_RX_PIN` 和 `UART1_TX_PIN`
+- 默认 UART 引脚为 `RX=IO10`、`TX=IO11`；如果接线不同，可在 `platformio.ini` 中调整 `UART1_RX_PIN` 和 `UART1_TX_PIN`
 - `IO8` 上的板载可寻址 RGB LED 参考 ESP32-S3 分支的状态颜色：断网红色、AP 模式橙色、STA 已连接绿色、TCP 已连接紫色、数据活动蓝色脉冲、Wi-Fi 扫描时绿色闪烁
 - ESP32-C6 对普通应用暴露 1 个 FreeRTOS 主核，另有 1 个 LP core。LP core 适合低功耗唤醒和简单监测，不适合运行 Arduino 任务或分担 TCP/UART 桥接
 - 桥接缓冲区沿用 ESP32-C3 的静态 SRAM 模型，因为常见 ESP32-C6-DevKitC-1 板卡不带 PSRAM
