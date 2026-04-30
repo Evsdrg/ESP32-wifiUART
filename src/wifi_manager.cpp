@@ -1,3 +1,15 @@
+/**
+ * @file   wifi_manager.cpp
+ * @brief  Wi-Fi 连接状态机与 AP/STA 模式管理
+ *
+ * 支持两种运行模式：
+ * - STA 模式：连接用户指定的 Wi-Fi 网络
+ * - AP 模式（fallback）：当无有效凭据或 STA 连接超时时作为热点提供配置界面
+ *
+ * 内部使用标志位实现状态转换，通过 pendingReconfigure 机制
+ * 确保配置变更在下一次主 loop 中安全应用（避免在 HTTP handler 中直接操作 Wi-Fi）。
+ */
+
 #include "wifi_manager.h"
 #include "app_config.h"
 #include "debug_log.h"
@@ -11,30 +23,55 @@ namespace wifi_manager {
 
 namespace {
 
+/** @brief 最近一次 STA 重连尝试的时间 */
 uint32_t lastWifiReconnectAttemptMs = 0;
+
+/** @brief 是否正在使用 STA 模式 */
 bool useStationModeFlag = false;
+
+/** @brief AP 模式是否激活 */
 bool accessPointActiveFlag = false;
+
+/** @brief STA 此前是否曾成功连接（用于检测断线事件） */
 bool stationWasConnected = false;
+
+/** @brief Wi-Fi 扫描是否进行中 */
 bool scanInProgressFlag = false;
+
+/** @brief 是否有待处理的 Wi-Fi 重配置请求 */
 bool pendingReconfigure = false;
+
+/** @brief 最近一次 Wi-Fi 扫描结果缓存 */
 WiFiScanResult scanResults[kMaxWiFiProfiles] = {};
+
+/** @brief 最近一次扫描的有效结果数量 */
 size_t scanResultCountValue = 0;
+
+/** @brief 状态变化回调（用于通知状态灯刷新） */
 void (*statusUpdateCallback)() = nullptr;
 
+/** @brief 触发状态更新回调 */
 void updateStatus() {
   if (statusUpdateCallback != nullptr) {
     statusUpdateCallback();
   }
 }
 
+/** @brief 停止 TCP Server（Wi-Fi 模式切换时调用） */
 void stopTcpServer() {
   bridge::stopTcpServer();
 }
 
+/** @brief 断开 TCP 客户端（Wi-Fi 切换时调用） */
 void disconnectTcpClient(const char *reason) {
   bridge::disconnectTcpClient(reason);
 }
 
+/**
+ * @brief 启动 TCP Server
+ *
+ * 仅在网络已就绪（STA 已连接或 AP 已激活）时启动。
+ */
 void startTcpServer() {
   if (!isNetworkReady()) {
     return;
@@ -45,6 +82,7 @@ void startTcpServer() {
   }
 }
 
+/** @brief 打印 STA 连接就绪信息 */
 void logStationReady() {
   debugPrintf(
       "STA mode ready. IP: %s, TCP port: %d\n",
@@ -52,6 +90,12 @@ void logStationReady() {
       TCP_BRIDGE_PORT);
 }
 
+/**
+ * @brief 启动 AP 模式（热点 fallback）
+ *
+ * 设备切换到 AP_SSID/AP_PASSWORD 热点，IP 固定为 192.168.4.1，
+ * 允许用户连接并通过网页配置 Wi-Fi 凭据。
+ */
 void startAccessPoint() {
   useStationModeFlag = false;
   accessPointActiveFlag = false;
@@ -71,6 +115,12 @@ void startAccessPoint() {
       TCP_BRIDGE_PORT);
 }
 
+/**
+ * @brief 切换到 AP 前先清理 STA 状态
+ *
+ * 需要：关闭 autoReconnect、disconnect、切换到 NULL 模式，
+ * 避免前后模式冲突导致 ESP32 Wi-Fi 栈异常。
+ */
 void stopStationBeforeAccessPoint() {
   useStationModeFlag = false;
   stationWasConnected = false;
@@ -81,6 +131,12 @@ void stopStationBeforeAccessPoint() {
   delay(100);
 }
 
+/**
+ * @brief 启动 STA 模式并连接激活的 Wi-Fi Profile
+ *
+ * 若无激活 Profile（active()==nullptr）则直接返回。
+ * 启动前先停止 TCP Server 并断开已有 TCP 客户端。
+ */
 void startStationMode() {
   const WiFiProfile *activeProfile = wifi_profiles::active();
   if (activeProfile == nullptr) {
@@ -104,6 +160,13 @@ void startStationMode() {
   debugPrintf("Connecting to WiFi SSID: %s\n", activeProfile->ssid.c_str());
 }
 
+/**
+ * @brief 等待 STA 首次连接结果
+ *
+ * 轮询 kWifiConnectTimeoutMs（15s）内是否连接成功：
+ * - 成功：记录 stationWasConnected，启动 TCP Server
+ * - 超时：切换到 AP fallback 模式
+ */
 void waitForInitialStationConnection() {
   const uint32_t startMs = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startMs < kWifiConnectTimeoutMs) {
@@ -128,6 +191,13 @@ void waitForInitialStationConnection() {
 
 }  // namespace
 
+/**
+ * @brief 初始化 Wi-Fi 管理器
+ * @param callback 状态变化时调用的回调（可为 nullptr）
+ *
+ * 若存在激活的 Wi-Fi Profile 则启动 STA 模式并等待连接；
+ * 否则直接启动 AP 模式。无论哪种模式，最终都会启动 TCP Server。
+ */
 void begin(void (*callback)()) {
   statusUpdateCallback = callback;
   if (wifi_profiles::active() != nullptr) {
@@ -139,6 +209,13 @@ void begin(void (*callback)()) {
   }
 }
 
+/**
+ * @brief STA 模式主循环处理
+ *
+ * 检测连接/断线事件：
+ * - 断线后：停止 TCP Server，断开 TCP 客户端
+ * - 断线期间：每 kWifiReconnectIntervalMs 尝试一次重连
+ */
 void handleStationMode() {
   if (!useStationModeFlag) {
     return;
@@ -178,6 +255,12 @@ void requestReconfigure() {
   pendingReconfigure = true;
 }
 
+/**
+ * @brief 执行待处理的 Wi-Fi 重配置
+ *
+ * 由 HTTP Server 的 Profile 保存/激活/删除操作触发。
+ * 在主循环中执行，而非 HTTP handler 回调中（避免 Wi-Fi 操作阻塞 HTTP 响应）。
+ */
 void applyPendingReconfigureIfNeeded() {
   if (!pendingReconfigure) {
     return;
@@ -252,6 +335,12 @@ String securityLabel(uint8_t encryptionType) {
   }
 }
 
+/**
+ * @brief 触发异步 Wi-Fi 扫描
+ *
+ * 扫描期间若 AP 已激活，则临时切换到 AP_STA 混合模式，
+ * 扫描结束后恢复纯 AP 模式，保证设备在扫描期间仍可被访问。
+ */
 void scanNearby() {
   scanInProgressFlag = true;
   updateStatus();

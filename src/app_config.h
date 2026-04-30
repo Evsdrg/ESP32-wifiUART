@@ -1,3 +1,10 @@
+/**
+ * @file   app_config.h
+ * @brief  全局编译配置宏与运行时常量
+ *
+ * 板级引脚、LED 模式、Wi-Fi 参数、UART 参数、缓冲区大小、超时时间等
+ * 均在此处定义。平台可通过 platformio.ini 的 build_flags 覆盖默认值。
+ */
 #pragma once
 
 #include <Arduino.h>
