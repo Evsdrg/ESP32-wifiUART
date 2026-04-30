@@ -7,11 +7,11 @@ The repository keeps target-specific firmware in separate branches so board-leve
 
 ## Branch Layout
 
-| Branch | Target | UART Pins | Status LED |
-|--------|--------|-----------|------------|
-| `ESP32S3` | ESP32-S3 board configuration | `RX=IO13`, `TX=IO14` | WS2812 on `IO48` via Arduino RGB LED helper |
-| `ESP32C3` | ESP32-C3 SuperMini configuration | `RX=IO3`, `TX=IO4` | Onboard LED on `IO8` |
-| `ESP32C6` | Espressif ESP32-C6-DevKitC-1 configuration | `RX=IO18`, `TX=IO9` | Addressable RGB LED on `IO8` |
+| Branch | PlatformIO env | Target | UART Pins | UART FIFO tier | Status LED |
+|--------|----------------|--------|-----------|----------------|------------|
+| `ESP32S3` | `esp32s3_120_16_8-qio_opi` | ESP32-S3 board configuration | `RX=IO13`, `TX=IO14` | HIGH, threshold `96` | WS2812 on `IO48` via Arduino RGB LED helper |
+| `ESP32C3` | `nologo_esp32c3_super_mini` | ESP32-C3 SuperMini configuration | `RX=IO3`, `TX=IO4` | MID, threshold `32` | Onboard LED on `IO8`, active-low |
+| `ESP32C6` | `esp32_c6_devkitc_1` | Espressif ESP32-C6-DevKitC-1 configuration | `RX=IO10`, `TX=IO11` | HIGH, threshold `96` | Addressable RGB LED on `IO8` |
 
 Check out the branch that matches your hardware before building or flashing.
 
@@ -29,11 +29,19 @@ Check out the branch that matches your hardware before building or flashing.
 This project uses PlatformIO.
 
 1. Check out the target branch you want to use.
-2. Review `platformio.ini` for that branch.
+2. Review the board-specific section in `platformio.ini`.
 3. Build the firmware:
 
 ```bash
-~/.platformio/penv/bin/platformio run
+~/.platformio/penv/bin/platformio run -e <platformio-env>
+```
+
+Examples:
+
+```bash
+~/.platformio/penv/bin/platformio run -e esp32s3_120_16_8-qio_opi
+~/.platformio/penv/bin/platformio run -e nologo_esp32c3_super_mini
+~/.platformio/penv/bin/platformio run -e esp32_c6_devkitc_1
 ```
 
 ## Flash
@@ -66,7 +74,19 @@ Then point your serial software to `/dev/ttyESP32`.
 
 - Wi-Fi credentials can be provisioned from the web UI and are stored in NVS Preferences
 - Up to 24 Wi-Fi profiles are supported
-- Branch-specific buffer sizes, UART FIFO thresholds, LED behavior, and board settings are intentional and may differ between `ESP32S3`, `ESP32C3`, and `ESP32C6`
+- Bridge buffers are `12KB` for TCP->UART and `20KB` for UART->TCP; UART driver buffers are `8KB` RX and `4KB` TX
+- `platformio.ini` is intentionally split into separate S3/C3/C6 environment sections instead of relying on implicit branch-only settings
+- UART RX FIFO threshold is configurable with `UART_FIFO_THRESHOLD`; current presets are MID=`32` for C3 and HIGH=`96` for S3/C6
+
+## UART FIFO Tiers
+
+The ESP32 UART FIFO is 128 bytes. A higher `UART_FIFO_THRESHOLD` reduces interrupt frequency but increases packetization delay.
+
+| Tier | Threshold | 115200 baud | 460800 baud | 921600 baud | Intended use |
+|------|-----------|-------------|-------------|-------------|--------------|
+| LOW | `16` | ~720 interrupts/s, ~1.4 ms | ~2880 interrupts/s, ~0.35 ms | ~5760 interrupts/s, ~0.17 ms | Lowest latency |
+| MID | `32` | ~360 interrupts/s, ~2.8 ms | ~1440 interrupts/s, ~0.69 ms | ~2880 interrupts/s, ~0.35 ms | Balanced response and interrupts |
+| HIGH | `96` | ~120 interrupts/s, ~8.3 ms | ~480 interrupts/s, ~2.1 ms | ~960 interrupts/s, ~1.0 ms | Lower interrupt rate at high baud rates |
 
 ## Board Notes
 
@@ -74,6 +94,7 @@ Then point your serial software to `/dev/ttyESP32`.
 
 - The `ESP32S3` branch targets an ESP32-S3 board with the PlatformIO board ID `esp32s3_120_16_8-qio_opi`
 - Default UART pins are `RX=IO13` and `TX=IO14`; adjust `UART1_RX_PIN` and `UART1_TX_PIN` in `platformio.ini` if your wiring differs
+- The default UART FIFO threshold is HIGH (`UART_FIFO_THRESHOLD=96`), suitable for `460800`/`921600` use with reduced interrupt rate
 - The status LED is a WS2812 RGB LED on `IO48`, driven through the Arduino-ESP32 RGB LED helper instead of FastLED
 - The ESP32-S3 branch uses static SRAM bridge buffers by default and can opt into PSRAM allocation with `USE_PSRAM_BRIDGE_BUFFERS=1`
 - Wi-Fi TX power is not configured by default on ESP32-S3; enable `CONFIGURE_WIFI_TX_POWER=1` and set `WIFI_TX_POWER` in `platformio.ini` if your deployment needs an explicit power level
@@ -83,6 +104,8 @@ Then point your serial software to `/dev/ttyESP32`.
 - The `ESP32C3` branch targets common ESP32-C3 SuperMini boards with the PlatformIO board ID `nologo_esp32c3_super_mini`
 - Default UART pins are `RX=IO3` and `TX=IO4`; adjust `UART1_RX_PIN` and `UART1_TX_PIN` in `platformio.ini` if your wiring differs
 - The status LED is the onboard single-color LED on `IO8`, configured as active-low
+- The default UART FIFO threshold is MID (`UART_FIFO_THRESHOLD=32`) to keep `9600`/`115200` responsive while avoiding excessive interrupts
+- The default app partition is sufficient for the current firmware; `huge_app.csv` is not used
 - The C3 build uses fixed static SRAM bridge buffers for predictable long-running behavior on boards without PSRAM
 - Wi-Fi TX power is limited by default with `WIFI_POWER_8_5dBm`; this is intentional for typical C3 SuperMini boards to reduce heat and power draw and improve long-running stability
 - Wi-Fi signal issues are common on black-PCB ESP32-C3 SuperMini boards. If the board cannot connect to Wi-Fi, or if its fallback AP cannot be seen by nearby devices, removing the original onboard antenna will usually make the device work again
@@ -91,7 +114,8 @@ Then point your serial software to `/dev/ttyESP32`.
 ### ESP32-C6
 
 - The `ESP32C6` branch targets Espressif ESP32-C6-DevKitC-1 with the PlatformIO board ID `esp32-c6-devkitc-1`
-- Default UART pins are `RX=IO18` and `TX=IO9`; adjust `UART1_RX_PIN` and `UART1_TX_PIN` in `platformio.ini` if your wiring differs
+- Default UART pins are `RX=IO10` and `TX=IO11`; adjust `UART1_RX_PIN` and `UART1_TX_PIN` in `platformio.ini` if your wiring differs
+- The default UART FIFO threshold is HIGH (`UART_FIFO_THRESHOLD=96`), matching the ESP32-S3 high-baud profile
 - The onboard addressable RGB LED on `IO8` follows the ESP32-S3 status color scheme: red for disconnected, orange for AP mode, green for STA connected, purple for TCP connected, blue pulses for data activity, and green blinking during Wi-Fi scans
 - ESP32-C6 exposes one FreeRTOS application core plus an LP core. The LP core is for low-power wake and simple monitoring workflows, not for running Arduino tasks or offloading the TCP/UART bridge
 - The bridge buffers intentionally follow the ESP32-C3 static SRAM model because common ESP32-C6-DevKitC-1 boards do not provide PSRAM
