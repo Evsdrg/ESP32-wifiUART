@@ -160,6 +160,7 @@ void disconnectTcpClient(const char *reason) {
   const bool hadSession = tcpClientActive;
   tcpClient.stop();              // 关闭 socket 并释放资源
   tcpClientActive = false;
+  clearSessionBuffers();
   if (hadSession) {
     ++tcpClientDisconnectCount;
   }
@@ -195,6 +196,7 @@ void acceptClientIfNeeded() {
     return;  // 尚无待处理的连接
   }
 
+  clearSessionBuffers();
   newClient.setNoDelay(true);  // 立即发送，无延迟
   tcpClient = newClient;
   tcpClientActive = true;
@@ -287,11 +289,25 @@ void flushTcpBufferToUart(HardwareSerial &uartPort) {
  */
 void pullUartIntoBuffer(HardwareSerial &uartPort) {
   uint8_t buffer[kIoChunkSize];
+
+  if (!isTcpClientConnected()) {
+    size_t bytesToDiscard = static_cast<size_t>(uartPort.available());
+    while (bytesToDiscard > 0) {
+      const size_t requestSize = min(bytesToDiscard, sizeof(buffer));
+      const size_t readSize = uartPort.read(buffer, requestSize);
+      if (readSize == 0) {
+        break;
+      }
+      bytesToDiscard -= readSize;
+    }
+    return;
+  }
+
   while (uartPort.available() > 0 && uartToTcpBuffer.freeSpace() > 0) {
     const size_t requestSize = min(
         static_cast<size_t>(uartPort.available()),
         min(sizeof(buffer), uartToTcpBuffer.freeSpace()));
-    const size_t readSize = uartPort.readBytes(buffer, requestSize);
+    const size_t readSize = uartPort.read(buffer, requestSize);
     if (readSize == 0) {
       break;
     }

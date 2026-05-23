@@ -92,6 +92,11 @@ void seedDefaultProfileIfNeeded() {
     return;
   }
 
+  if (std::strlen(WIFI_SSID) > 32 || std::strlen(WIFI_PASSWORD) > 64) {
+    debugPrintln("Default Wi-Fi profile from build flags is too long");
+    return;
+  }
+
   char ssidKey[4] = {0};
   char passwordKey[4] = {0};
   makeWiFiProfileKeys(0, ssidKey, passwordKey);
@@ -176,7 +181,8 @@ bool profileInUse(uint8_t index) {
 /**
  * @brief 保存凭据到指定槽位
  *
- * 若 password 为空且该槽位已有凭据，则保留原密码（实现"仅修改 SSID"场景）。
+ * password 为空时会保存为空密码，表示开放网络或主动清空该槽位密码。
+ * 如需保留旧密码，调用者应先读取旧密码再传入本函数。
  *
  * @param index    目标槽位
  * @param ssid     网络名称（不可为空）
@@ -184,7 +190,7 @@ bool profileInUse(uint8_t index) {
  * @return true 保存成功
  */
 bool save(uint8_t index, const String &ssid, const String &password) {
-  if (index >= kMaxWiFiProfiles || ssid.isEmpty()) {
+  if (index >= kMaxWiFiProfiles || ssid.isEmpty() || ssid.length() > 32 || password.length() > 64) {
     return false;
   }
 
@@ -196,13 +202,8 @@ bool save(uint8_t index, const String &ssid, const String &password) {
     return false;
   }
 
-  // 密码为空时保留原密码，实现渐进式修改
-  String effectivePassword = password;
-  if (password.isEmpty() && profiles[index].inUse) {
-    effectivePassword = profiles[index].password;
-  }
-  preferencesStore.putString(passwordKey, effectivePassword);
-  profiles[index] = {true, ssid, effectivePassword};
+  preferencesStore.putString(passwordKey, password);
+  profiles[index] = {true, ssid, password};
   return true;
 }
 

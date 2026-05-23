@@ -97,6 +97,9 @@ void loop() {
   // Wi-Fi STA 断线检测与重连
   wifi_manager::handleStationMode();
 
+  // 异步 Wi-Fi 扫描完成检测
+  wifi_manager::pollScan();
+
   // HTTP 请求处理（配置网页 + JSON API）
   http_server::handleClient();
 

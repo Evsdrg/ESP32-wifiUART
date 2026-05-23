@@ -13,11 +13,11 @@
 #include <cstdint>
 
 #ifndef UART1_RX_PIN
-#define UART1_RX_PIN 18
+#define UART1_RX_PIN 3
 #endif
 
 #ifndef UART1_TX_PIN
-#define UART1_TX_PIN 17
+#define UART1_TX_PIN 2
 #endif
 
 #ifndef STATUS_LED_PIN
@@ -29,7 +29,7 @@
 #endif
 
 #ifndef USE_RGB_STATUS_LED
-#define USE_RGB_STATUS_LED 0
+#define USE_RGB_STATUS_LED 1
 #endif
 
 #ifndef STATUS_RGB_BRIGHTNESS
@@ -56,6 +56,29 @@
 #define AP_PASSWORD "12345678"
 #endif
 
+#ifndef ENABLE_HTTP_AUTH
+#define ENABLE_HTTP_AUTH 0
+#endif
+
+#ifndef HTTP_AUTH_USERNAME
+#define HTTP_AUTH_USERNAME "admin"
+#endif
+
+#ifndef HTTP_AUTH_PASSWORD
+#define HTTP_AUTH_PASSWORD ""
+#endif
+
+#ifndef DEVICE_LABEL
+#define DEVICE_LABEL "ESP32-C3"
+#endif
+
+static_assert(sizeof(AP_SSID) > 1 && sizeof(AP_SSID) <= 33,
+              "AP_SSID must be 1-32 bytes");
+static_assert(sizeof(AP_PASSWORD) == 1 || (sizeof(AP_PASSWORD) >= 9 && sizeof(AP_PASSWORD) <= 64),
+              "AP_PASSWORD must be empty or 8-63 bytes");
+static_assert(!ENABLE_HTTP_AUTH || sizeof(HTTP_AUTH_PASSWORD) > 1,
+              "HTTP_AUTH_PASSWORD must be set when ENABLE_HTTP_AUTH=1");
+
 #ifndef TCP_BRIDGE_PORT
 #define TCP_BRIDGE_PORT 6638
 #endif
@@ -74,6 +97,8 @@ constexpr bool kEnableDebugLogs = false;
 
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 constexpr uint32_t kWifiReconnectIntervalMs = 3000;
+constexpr uint32_t kWifiFallbackRetryIntervalMs = 30000;
+constexpr uint32_t kWifiScanTimeoutMs = 12000;
 #if CONFIGURE_WIFI_TX_POWER
 constexpr wifi_power_t kWifiTxPower = WIFI_TX_POWER;
 #endif
@@ -99,6 +124,8 @@ constexpr uint32_t kActivityPulseGapMs = 55;
 #ifndef UART_FIFO_THRESHOLD
 #define UART_FIFO_THRESHOLD 112
 #endif
+static_assert(UART_FIFO_THRESHOLD >= 1 && UART_FIFO_THRESHOLD <= 127,
+              "UART_FIFO_THRESHOLD must be 1-127 bytes");
 constexpr size_t kIoChunkSize = 256;
 constexpr size_t kPendingTcpToUartBytes = 12288;
 constexpr size_t kPendingUartToTcpBytes = 20480;

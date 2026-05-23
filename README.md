@@ -11,7 +11,8 @@ The repository keeps target-specific firmware in separate branches so board-leve
 |--------|--------|-----------|------------|
 | `ESP32S3` | ESP32-S3 board configuration | `RX=IO13`, `TX=IO14` | WS2812 on `IO48` via Arduino RGB LED helper |
 | `ESP32C3` | ESP32-C3 SuperMini configuration | `RX=IO3`, `TX=IO4` | Onboard LED on `IO8` |
-| `ESP32C6` | Espressif ESP32-C6-DevKitC-1 configuration | `RX=IO18`, `TX=IO9` | Addressable RGB LED on `IO8` |
+| `ESP32C3-DevKitM-1` | Espressif ESP32-C3-DevKitM-1 configuration | `RX=IO3`, `TX=IO2` | Addressable RGB LED on `IO8` |
+| `ESP32C6` | Espressif ESP32-C6-DevKitC-1 configuration | `RX=IO10`, `TX=IO11` | Addressable RGB LED on `IO8` |
 
 Check out the branch that matches your hardware before building or flashing.
 
@@ -68,6 +69,13 @@ Then point your serial software to `/dev/ttyESP32`.
 - Up to 24 Wi-Fi profiles are supported
 - Branch-specific buffer sizes, UART FIFO thresholds, LED behavior, and board settings are intentional and may differ between `ESP32S3`, `ESP32C3`, and `ESP32C6`
 
+## HTTP API Notes
+
+- `POST /api/wifi/scan` starts a non-blocking Wi-Fi scan and returns `{ "scanning": true, "networks": [] }` while the scan is running
+- `GET /api/wifi/scan` returns the current scan state and the most recent scan result list
+- `POST /api/wifi/save` keeps the previous password for an existing slot when `password` is empty and `keepPassword` is omitted or set to `1`; pass `keepPassword=0` to save an empty password for open networks
+- Define `ENABLE_HTTP_AUTH=1` and set `HTTP_AUTH_PASSWORD` in `platformio.ini` to protect the web UI and JSON APIs with HTTP Basic Auth
+
 ## Board Notes
 
 ### ESP32-S3
@@ -78,7 +86,15 @@ Then point your serial software to `/dev/ttyESP32`.
 - The ESP32-S3 branch uses static SRAM bridge buffers by default and can opt into PSRAM allocation with `USE_PSRAM_BRIDGE_BUFFERS=1`
 - Wi-Fi TX power is not configured by default on ESP32-S3; enable `CONFIGURE_WIFI_TX_POWER=1` and set `WIFI_TX_POWER` in `platformio.ini` if your deployment needs an explicit power level
 
-### ESP32-C3
+### ESP32-C3 DevKitM-1
+
+- The `ESP32C3-DevKitM-1` branch targets Espressif ESP32-C3-DevKitM-1 with the PlatformIO board ID `esp32-c3-devkitm-1`
+- Default UART pins are `RX=IO3` and `TX=IO2`; adjust `UART1_RX_PIN` and `UART1_TX_PIN` in `platformio.ini` if your wiring differs
+- The addressable RGB LED on `IO8` follows the ESP32-S3 status color scheme: red for disconnected, orange for AP mode, green for STA connected, purple for TCP connected, blue pulses for data activity, and green blinking during Wi-Fi scans
+- The C3 build uses fixed static SRAM bridge buffers for predictable long-running behavior on boards without PSRAM
+- Wi-Fi TX power is limited by default with `WIFI_POWER_8_5dBm`; adjust `CONFIGURE_WIFI_TX_POWER` and `WIFI_TX_POWER` in `platformio.ini` if your deployment needs a different power level
+
+### ESP32-C3 SuperMini
 
 - The `ESP32C3` branch targets common ESP32-C3 SuperMini boards with the PlatformIO board ID `nologo_esp32c3_super_mini`
 - Default UART pins are `RX=IO3` and `TX=IO4`; adjust `UART1_RX_PIN` and `UART1_TX_PIN` in `platformio.ini` if your wiring differs
@@ -91,7 +107,7 @@ Then point your serial software to `/dev/ttyESP32`.
 ### ESP32-C6
 
 - The `ESP32C6` branch targets Espressif ESP32-C6-DevKitC-1 with the PlatformIO board ID `esp32-c6-devkitc-1`
-- Default UART pins are `RX=IO18` and `TX=IO9`; adjust `UART1_RX_PIN` and `UART1_TX_PIN` in `platformio.ini` if your wiring differs
+- Default UART pins are `RX=IO10` and `TX=IO11`; adjust `UART1_RX_PIN` and `UART1_TX_PIN` in `platformio.ini` if your wiring differs
 - The onboard addressable RGB LED on `IO8` follows the ESP32-S3 status color scheme: red for disconnected, orange for AP mode, green for STA connected, purple for TCP connected, blue pulses for data activity, and green blinking during Wi-Fi scans
 - ESP32-C6 exposes one FreeRTOS application core plus an LP core. The LP core is for low-power wake and simple monitoring workflows, not for running Arduino tasks or offloading the TCP/UART bridge
 - The bridge buffers intentionally follow the ESP32-C3 static SRAM model because common ESP32-C6-DevKitC-1 boards do not provide PSRAM

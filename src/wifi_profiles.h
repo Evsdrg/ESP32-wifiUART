@@ -48,10 +48,10 @@ const WiFiProfile &profile(uint8_t index);
 bool profileInUse(uint8_t index);
 
 /**
- * @brief 保存凭据到指定槽位（若密码为空则保留该槽位已有密码）
+ * @brief 保存凭据到指定槽位
  * @param index     槽位编号
  * @param ssid      网络名称
- * @param password  密码（可为空字符串）
+ * @param password  密码（可为空字符串，表示开放网络或清空密码）
  * @return true 保存成功
  */
 bool save(uint8_t index, const String &ssid, const String &password);

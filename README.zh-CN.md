@@ -11,7 +11,8 @@ ESP WiFi UART Bridge 是一个通过 Wi-Fi 暴露 TCP 套接字，并将其桥�
 |------|----------|-----------|--------|
 | `ESP32S3` | ESP32-S3 配置 | `RX=IO13`、`TX=IO14` | 通过 Arduino RGB LED 辅助函数驱动 `IO48` 上的 WS2812 |
 | `ESP32C3` | ESP32-C3 SuperMini 配置 | `RX=IO3`、`TX=IO4` | `IO8` 板载 LED |
-| `ESP32C6` | Espressif ESP32-C6-DevKitC-1 配置 | `RX=IO18`、`TX=IO9` | `IO8` 上的可寻址 RGB LED |
+| `ESP32C3-DevKitM-1` | Espressif ESP32-C3-DevKitM-1 配置 | `RX=IO3`、`TX=IO2` | `IO8` 上的可寻址 RGB LED |
+| `ESP32C6` | Espressif ESP32-C6-DevKitC-1 配置 | `RX=IO10`、`TX=IO11` | `IO8` 上的可寻址 RGB LED |
 
 构建或烧录前，请先切换到与你硬件匹配的分支。
 
@@ -68,6 +69,13 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 - 最多支持 24 组 Wi-Fi 配置
 - 缓冲区大小、UART FIFO 阈值、状态灯行为和板级配置会因 `ESP32S3`、`ESP32C3` 与 `ESP32C6` 分支不同而有所区别，这些差异是有意保留的
 
+## HTTP API 说明
+
+- `POST /api/wifi/scan` 会启动一次非阻塞 Wi-Fi 扫描，扫描进行中返回 `{ "scanning": true, "networks": [] }`
+- `GET /api/wifi/scan` 返回当前扫描状态和最近一次扫描结果列表
+- `POST /api/wifi/save` 在已有槽位上遇到空 `password` 且未传 `keepPassword` 或 `keepPassword=1` 时会保留旧密码；开放网络或需要清空密码时传 `keepPassword=0`
+- 在 `platformio.ini` 中定义 `ENABLE_HTTP_AUTH=1` 并设置 `HTTP_AUTH_PASSWORD` 后，Web 界面和 JSON API 会启用 HTTP Basic Auth 保护
+
 ## 开发板说明
 
 ### ESP32-S3
@@ -78,7 +86,15 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 - ESP32-S3 分支默认使用静态 SRAM 桥接缓冲区，可通过 `USE_PSRAM_BRIDGE_BUFFERS=1` 切换为 PSRAM 分配
 - ESP32-S3 默认不配置 Wi-Fi 发射功率；如部署环境需要固定功率，可在 `platformio.ini` 中启用 `CONFIGURE_WIFI_TX_POWER=1` 并设置 `WIFI_TX_POWER`
 
-### ESP32-C3
+### ESP32-C3 DevKitM-1
+
+- `ESP32C3-DevKitM-1` 分支面向 Espressif ESP32-C3-DevKitM-1，PlatformIO 板卡 ID 为 `esp32-c3-devkitm-1`
+- 默认 UART 引脚为 `RX=IO3`、`TX=IO2`；如果接线不同，可在 `platformio.ini` 中调整 `UART1_RX_PIN` 和 `UART1_TX_PIN`
+- `IO8` 上的可寻址 RGB LED 参考 ESP32-S3 分支的状态颜色：断网红色、AP 模式橙色、STA 已连接绿色、TCP 已连接紫色、数据活动蓝色脉冲、Wi-Fi 扫描时绿色闪烁
+- C3 构建使用固定静态 SRAM 桥接缓冲区，适合不带 PSRAM 的开发板长期稳定运行
+- Wi-Fi 发射功率默认限制为 `WIFI_POWER_8_5dBm`；如部署环境需要不同功率，可在 `platformio.ini` 中调整 `CONFIGURE_WIFI_TX_POWER` 和 `WIFI_TX_POWER`
+
+### ESP32-C3 SuperMini
 
 - `ESP32C3` 分支面向常见 ESP32-C3 SuperMini 开发板，PlatformIO 板卡 ID 为 `nologo_esp32c3_super_mini`
 - 默认 UART 引脚为 `RX=IO3`、`TX=IO4`；如果接线不同，可在 `platformio.ini` 中调整 `UART1_RX_PIN` 和 `UART1_TX_PIN`
@@ -91,7 +107,7 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 ### ESP32-C6
 
 - `ESP32C6` 分支面向 Espressif ESP32-C6-DevKitC-1，PlatformIO 板卡 ID 为 `esp32-c6-devkitc-1`
-- 默认 UART 引脚为 `RX=IO18`、`TX=IO9`；如果接线不同，可在 `platformio.ini` 中调整 `UART1_RX_PIN` 和 `UART1_TX_PIN`
+- 默认 UART 引脚为 `RX=IO10`、`TX=IO11`；如果接线不同，可在 `platformio.ini` 中调整 `UART1_RX_PIN` 和 `UART1_TX_PIN`
 - `IO8` 上的板载可寻址 RGB LED 参考 ESP32-S3 分支的状态颜色：断网红色、AP 模式橙色、STA 已连接绿色、TCP 已连接紫色、数据活动蓝色脉冲、Wi-Fi 扫描时绿色闪烁
 - ESP32-C6 对普通应用暴露 1 个 FreeRTOS 主核，另有 1 个 LP core。LP core 适合低功耗唤醒和简单监测，不适合运行 Arduino 任务或分担 TCP/UART 桥接
 - 桥接缓冲区沿用 ESP32-C3 的静态 SRAM 模型，因为常见 ESP32-C6-DevKitC-1 板卡不带 PSRAM
