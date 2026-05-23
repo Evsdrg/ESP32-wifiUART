@@ -35,8 +35,17 @@ bool accessPointActiveFlag = false;
 /** @brief STA 此前是否曾成功连接（用于检测断线事件） */
 bool stationWasConnected = false;
 
+/** @brief AP fallback 模式下是否应后台重试激活的 STA profile */
+bool retryStationFromAccessPointFlag = false;
+
+/** @brief AP fallback 模式下是否已经发起 STA 重试 */
+bool stationRetryAttemptActive = false;
+
 /** @brief Wi-Fi 扫描是否进行中 */
 bool scanInProgressFlag = false;
+
+/** @brief 当前 Wi-Fi 扫描开始时间，用于超时恢复 */
+uint32_t scanStartedAtMs = 0;
 
 /** @brief 是否有待处理的 Wi-Fi 重配置请求 */
 bool pendingReconfigure = false;
@@ -55,6 +64,45 @@ void updateStatus() {
   if (statusUpdateCallback != nullptr) {
     statusUpdateCallback();
   }
+}
+
+/** @brief 结束一次异步扫描并缓存结果 */
+void finishScan(int16_t count) {
+  scanResultCountValue = 0;
+
+  if (count > 0) {
+    const size_t cappedCount = min(static_cast<size_t>(count), static_cast<size_t>(kMaxWiFiProfiles));
+    for (size_t i = 0; i < cappedCount; ++i) {
+      scanResults[i].ssid = WiFi.SSID(i);
+      scanResults[i].rssi = WiFi.RSSI(i);
+      scanResults[i].channel = static_cast<uint8_t>(WiFi.channel(i));
+      scanResults[i].encryption = static_cast<uint8_t>(WiFi.encryptionType(i));
+    }
+    scanResultCountValue = cappedCount;
+  }
+
+  WiFi.scanDelete();
+
+  if (accessPointActiveFlag && !stationRetryAttemptActive) {
+    WiFi.mode(WIFI_AP);
+  }
+
+  scanInProgressFlag = false;
+  scanStartedAtMs = 0;
+  updateStatus();
+}
+
+/** @brief Wi-Fi 模式切换前取消正在进行的异步扫描 */
+void cancelScanIfNeeded() {
+  if (!scanInProgressFlag) {
+    return;
+  }
+
+  WiFi.scanDelete();
+  scanInProgressFlag = false;
+  scanStartedAtMs = 0;
+  scanResultCountValue = 0;
+  updateStatus();
 }
 
 /** @brief 停止 TCP Server（Wi-Fi 模式切换时调用） */
@@ -97,8 +145,11 @@ void logStationReady() {
  * 允许用户连接并通过网页配置 Wi-Fi 凭据。
  */
 void startAccessPoint() {
+  cancelScanIfNeeded();
   useStationModeFlag = false;
   accessPointActiveFlag = false;
+  retryStationFromAccessPointFlag = false;
+  stationRetryAttemptActive = false;
   WiFi.mode(WIFI_AP);
 
   if (!WiFi.softAP(AP_SSID, AP_PASSWORD)) {
@@ -144,8 +195,11 @@ void startStationMode() {
     return;
   }
 
+  cancelScanIfNeeded();
   useStationModeFlag = true;
   accessPointActiveFlag = false;
+  retryStationFromAccessPointFlag = false;
+  stationRetryAttemptActive = false;
   stationWasConnected = false;
   stopTcpServer();
   if (bridge::isTcpClientConnected()) {
@@ -185,8 +239,58 @@ void waitForInitialStationConnection() {
     debugPrintln("Initial WiFi connect timed out, falling back to AP mode");
     stopStationBeforeAccessPoint();
     startAccessPoint();
+    retryStationFromAccessPointFlag = wifi_profiles::active() != nullptr;
+    lastWifiReconnectAttemptMs = millis();
     startTcpServer();
   }
+}
+
+/** @brief AP fallback 保持可访问，同时周期性后台重试激活的 STA profile */
+void handleAccessPointStationRetry() {
+  if (!accessPointActiveFlag || !retryStationFromAccessPointFlag) {
+    return;
+  }
+
+  const WiFiProfile *activeProfile = wifi_profiles::active();
+  if (activeProfile == nullptr) {
+    retryStationFromAccessPointFlag = false;
+    stationRetryAttemptActive = false;
+    return;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    debugPrintln("STA recovered from AP fallback");
+    cancelScanIfNeeded();
+    if (bridge::isTcpClientConnected()) {
+      disconnectTcpClient("sta recovered from ap fallback");
+    }
+    stopTcpServer();
+    WiFi.softAPdisconnect(true);
+    delay(100);
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    accessPointActiveFlag = false;
+    useStationModeFlag = true;
+    retryStationFromAccessPointFlag = false;
+    stationRetryAttemptActive = false;
+    stationWasConnected = true;
+    bridge::markWifiReconnect();
+    logStationReady();
+    startTcpServer();
+    updateStatus();
+    return;
+  }
+
+  if (scanInProgressFlag || millis() - lastWifiReconnectAttemptMs < kWifiFallbackRetryIntervalMs) {
+    return;
+  }
+
+  debugPrintln("Retrying WiFi connection from AP fallback");
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.disconnect(false, false);
+  WiFi.begin(activeProfile->ssid.c_str(), activeProfile->password.c_str());
+  stationRetryAttemptActive = true;
+  lastWifiReconnectAttemptMs = millis();
 }
 
 }  // namespace
@@ -218,6 +322,7 @@ void begin(void (*callback)()) {
  */
 void handleStationMode() {
   if (!useStationModeFlag) {
+    handleAccessPointStationRetry();
     return;
   }
 
@@ -342,46 +447,42 @@ String securityLabel(uint8_t encryptionType) {
  * 扫描结束后恢复纯 AP 模式，保证设备在扫描期间仍可被访问。
  */
 void scanNearby() {
+  if (scanInProgressFlag) {
+    return;
+  }
+
   scanInProgressFlag = true;
+  scanStartedAtMs = millis();
+  scanResultCountValue = 0;
   updateStatus();
 
   if (accessPointActiveFlag) {
     WiFi.mode(WIFI_AP_STA);
   }
 
-  scanResultCountValue = 0;
-  int16_t count = WiFi.scanNetworks(true, true);
-  while (count == WIFI_SCAN_RUNNING) {
-    delay(30);
-    updateStatus();
-    count = WiFi.scanComplete();
-  }
-  if (count <= 0) {
-    WiFi.scanDelete();
-    if (accessPointActiveFlag) {
-      WiFi.mode(WIFI_AP);
-    }
-    scanInProgressFlag = false;
-    updateStatus();
+  const int16_t count = WiFi.scanNetworks(true, true);
+  if (count == WIFI_SCAN_RUNNING) {
     return;
   }
 
-  const size_t cappedCount = min(static_cast<size_t>(count), static_cast<size_t>(kMaxWiFiProfiles));
-  for (size_t i = 0; i < cappedCount; ++i) {
-    scanResults[i].ssid = WiFi.SSID(i);
-    scanResults[i].rssi = WiFi.RSSI(i);
-    scanResults[i].channel = static_cast<uint8_t>(WiFi.channel(i));
-    scanResults[i].encryption = static_cast<uint8_t>(WiFi.encryptionType(i));
-  }
-  scanResultCountValue = cappedCount;
-  WiFi.scanDelete();
+  finishScan(count);
+}
 
-  if (accessPointActiveFlag) {
-    WiFi.mode(WIFI_AP);
+void pollScan() {
+  if (!scanInProgressFlag) {
+    return;
   }
 
-  scanInProgressFlag = false;
-  updateStatus();
+  const int16_t count = WiFi.scanComplete();
+  if (count == WIFI_SCAN_RUNNING) {
+    if (millis() - scanStartedAtMs >= kWifiScanTimeoutMs) {
+      debugPrintln("WiFi scan timed out");
+      finishScan(WIFI_SCAN_FAILED);
+    }
+    return;
+  }
+
+  finishScan(count);
 }
 
 size_t scanResultCount() {

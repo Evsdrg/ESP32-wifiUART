@@ -7,6 +7,7 @@
  */
 
 #include "web_page.h"
+#include "app_config.h"
 
 namespace wifi_uart {
 
@@ -16,7 +17,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>ESP32-C6 串口配置</title>
+  <title>)HTML" DEVICE_LABEL R"HTML( 串口配置</title>
   <style>
     :root { color-scheme: dark; }
     body { font-family: Arial, sans-serif; margin: 0; background: #111827; color: #e5e7eb; }
@@ -57,7 +58,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
 </head>
 <body>
   <main>
-    <h1>ESP32-C6 串口桥控制台</h1>
+    <h1>)HTML" DEVICE_LABEL R"HTML( 串口桥控制台</h1>
     <p>查看并修改 TCP 串口桥当前使用的 UART1 参数。</p>
     <section class="card">
       <form id="uart-form">
@@ -131,6 +132,13 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
               <input id="wifiPassword" name="password" type="password" maxlength="64" placeholder="留空可保留当前槽位已有密码，或用于开放网络">
             </div>
             <div>
+              <label for="keepPassword">密码留空时</label>
+              <select id="keepPassword" name="keepPassword">
+                <option value="1">保留该槽位旧密码</option>
+                <option value="0">保存为空密码</option>
+              </select>
+            </div>
+            <div>
               <label for="activateProfile">保存后立即启用</label>
               <select id="activateProfile" name="activate">
                 <option value="0">否</option>
@@ -143,7 +151,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
           </div>
         </form>
         <div class="status" id="wifi-status"></div>
-        <div class="subtle" id="wifi-password-hint">密码留空仅适用于开放网络，或保留当前槽位已保存的密码。</div>
+        <div class="subtle" id="wifi-password-hint">密码留空默认保留旧密码；如果要开放网络或清空密码，请选择保存为空密码。</div>
         <div class="profiles" id="profiles">当前还没有保存任何 Wi-Fi 配置。</div>
 
         <div class="section">
@@ -186,6 +194,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
     const helpModalTextEl = document.getElementById('help-modal-text');
     const helpModalCloseEl = document.getElementById('help-modal-close');
     const commonBaudRates = ['9600', '19200', '38400', '57600', '115200', '230400', '460800', '921600'];
+    let scanPollTimer = null;
 
     // 初始化 24 个 Profile 槽位下拉选项
     for (let i = 0; i < 24; i += 1) {
@@ -332,7 +341,34 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
     function updatePasswordHint(isOpenNetwork) {
       wifiPasswordHintEl.textContent = isOpenNetwork
         ? '已选择开放网络，可以不填写密码。'
-        : '密码留空仅适用于开放网络，或保留当前槽位已保存的密码。';
+        : '密码留空默认保留旧密码；如果要开放网络或清空密码，请选择保存为空密码。';
+    }
+
+    async function fetchScanResults() {
+      const response = await fetch('/api/wifi/scan');
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || '读取扫描结果失败');
+      }
+      return data;
+    }
+
+    async function pollScanUntilComplete() {
+      try {
+        const data = await fetchScanResults();
+        if (data.scanning) {
+          scanStatusEl.textContent = '正在扫描附近 Wi-Fi...';
+          scanPollTimer = window.setTimeout(pollScanUntilComplete, 500);
+          return;
+        }
+
+        scanPollTimer = null;
+        renderScanResults(data);
+        scanStatusEl.textContent = `共扫描到 ${data.networks.length} 个热点。`;
+      } catch (error) {
+        scanPollTimer = null;
+        scanStatusEl.textContent = error.message;
+      }
     }
 
     async function refreshWiFi() {
@@ -418,6 +454,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       wifiForm.ssid.value = ssid;
       if (isOpenNetwork) {
         wifiForm.password.value = '';
+        wifiForm.keepPassword.value = '0';
       }
       wifiForm.activate.value = '1';
       updatePasswordHint(isOpenNetwork);
@@ -426,14 +463,23 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
 
     scanButton.addEventListener('click', async () => {
       scanStatusEl.textContent = '正在扫描附近 Wi-Fi...';
+      if (scanPollTimer !== null) {
+        window.clearTimeout(scanPollTimer);
+        scanPollTimer = null;
+      }
+
       try {
         const response = await fetch('/api/wifi/scan', { method: 'POST' });
         const data = await response.json();
         if (!response.ok) {
           throw new Error(data.error || '扫描失败');
         }
-        renderScanResults(data);
-        scanStatusEl.textContent = `共扫描到 ${data.networks.length} 个热点。`;
+        if (data.scanning) {
+          scanPollTimer = window.setTimeout(pollScanUntilComplete, 500);
+        } else {
+          renderScanResults(data);
+          scanStatusEl.textContent = `共扫描到 ${data.networks.length} 个热点。`;
+        }
       } catch (error) {
         scanStatusEl.textContent = error.message;
       }

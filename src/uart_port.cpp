@@ -132,7 +132,7 @@ bool applySettings(const UartSettings &settings) {
   uartPort.flush();
   uartPort.end();
 
-  // 配置驱动内部缓冲区大小（8192/4092 是平衡内存与吞吐的常用值）
+  // 配置驱动内部缓冲区大小（8192/4096 是平衡内存与吞吐的常用值）
   uartPort.setRxBufferSize(kUartDriverRxBufferSize);
   uartPort.setTxBufferSize(kUartDriverTxBufferSize);
 
@@ -146,7 +146,7 @@ bool applySettings(const UartSettings &settings) {
       20000UL,     // timeout（等待 FIFO 排空前最多等 20ms）
       UART_FIFO_THRESHOLD);  // RX FIFO 满阈值（平台可配置档位）
 
-  uartPort.setTimeout(0);  // readBytes() 立即返回，不阻塞等待
+  uartPort.setTimeout(0);  // 保持串口读取路径非阻塞
   currentSettings = settings;
 
   debugPrintf(

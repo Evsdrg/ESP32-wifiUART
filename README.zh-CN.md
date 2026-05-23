@@ -7,11 +7,11 @@ ESP WiFi UART Bridge 是一个通过 Wi-Fi 暴露 TCP 套接字，并将其桥�
 
 ## 分支布局
 
-| 分支 | 目标平台 | UART 引脚 | 状态灯 |
-|------|----------|-----------|--------|
-| `ESP32S3` | ESP32-S3 配置 | `RX=IO13`、`TX=IO14` | 通过 Arduino RGB LED 辅助函数驱动 `IO48` 上的 WS2812 |
-| `ESP32C3` | ESP32-C3 SuperMini 配置 | `RX=IO3`、`TX=IO4` | `IO8` 板载 LED |
-| `ESP32C6` | Espressif ESP32-C6-DevKitC-1 配置 | `RX=IO10`、`TX=IO11` | `IO8` 上的可寻址 RGB LED |
+| 分支 | PlatformIO 环境 | 目标平台 | UART 引脚 | UART FIFO 档位 | 状态灯 |
+|------|-----------------|----------|-----------|----------------|--------|
+| `ESP32S3` | `esp32s3_120_16_8-qio_opi` | ESP32-S3 配置 | `RX=IO13`、`TX=IO14` | HIGH，阈值 `96` | 通过 Arduino RGB LED 辅助函数驱动 `IO48` 上的 WS2812 |
+| `ESP32C3` | `nologo_esp32c3_super_mini` | ESP32-C3 SuperMini 配置 | `RX=IO3`、`TX=IO4` | MID，阈值 `32` | `IO8` 板载 LED，低电平有效 |
+| `ESP32C6` | `esp32_c6_devkitc_1` | Espressif ESP32-C6-DevKitC-1 配置 | `RX=IO10`、`TX=IO11` | HIGH，阈值 `96` | `IO8` 上的可寻址 RGB LED |
 
 构建或烧录前，请先切换到与你硬件匹配的分支。
 
@@ -29,11 +29,19 @@ ESP WiFi UART Bridge 是一个通过 Wi-Fi 暴露 TCP 套接字，并将其桥�
 本项目使用 PlatformIO。
 
 1. 切换到目标硬件对应的分支。
-2. 检查该分支中的 `platformio.ini`。
+2. 检查 `platformio.ini` 中对应型号的独立环境段。
 3. 执行构建：
 
 ```bash
-~/.platformio/penv/bin/platformio run
+~/.platformio/penv/bin/platformio run -e <platformio-env>
+```
+
+示例：
+
+```bash
+~/.platformio/penv/bin/platformio run -e esp32s3_120_16_8-qio_opi
+~/.platformio/penv/bin/platformio run -e nologo_esp32c3_super_mini
+~/.platformio/penv/bin/platformio run -e esp32_c6_devkitc_1
 ```
 
 ## 烧录
@@ -66,7 +74,26 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 
 - Wi-Fi 凭据可通过 Web 界面写入，并保存在 NVS Preferences 中
 - 最多支持 24 组 Wi-Fi 配置
-- 缓冲区大小、UART FIFO 阈值、状态灯行为和板级配置会因 `ESP32S3`、`ESP32C3` 与 `ESP32C6` 分支不同而有所区别，这些差异是有意保留的
+- 桥接缓冲区为 TCP->UART `12KB`、UART->TCP `20KB`；UART 驱动内部缓冲为 RX `8KB`、TX `4KB`
+- `platformio.ini` 有意按 S3/C3/C6 分成独立环境段，而不是依赖隐式的分支配置
+- UART RX FIFO 阈值可通过 `UART_FIFO_THRESHOLD` 调整；当前 C3 使用 MID=`32`，S3/C6 使用 HIGH=`96`
+
+## HTTP API 说明
+
+- `POST /api/wifi/scan` 会启动一次非阻塞 Wi-Fi 扫描，扫描进行中返回 `{ "scanning": true, "networks": [] }`
+- `GET /api/wifi/scan` 返回当前扫描状态和最近一次扫描结果列表
+- `POST /api/wifi/save` 在已有槽位上遇到空 `password` 且未传 `keepPassword` 或 `keepPassword=1` 时会保留旧密码；开放网络或需要清空密码时传 `keepPassword=0`
+- 在 `platformio.ini` 中定义 `ENABLE_HTTP_AUTH=1` 并设置 `HTTP_AUTH_PASSWORD` 后，Web 界面和 JSON API 会启用 HTTP Basic Auth 保护
+
+## UART FIFO 档位
+
+ESP32 UART FIFO 为 128 字节。`UART_FIFO_THRESHOLD` 越大，中断次数越少，但单次数据打包延迟越高。
+
+| 档位 | 阈值 | 115200 baud | 460800 baud | 921600 baud | 适用场景 |
+|------|------|-------------|-------------|-------------|----------|
+| LOW | `16` | 约 720 次/秒，约 1.4 ms | 约 2880 次/秒，约 0.35 ms | 约 5760 次/秒，约 0.17 ms | 极低延迟 |
+| MID | `32` | 约 360 次/秒，约 2.8 ms | 约 1440 次/秒，约 0.69 ms | 约 2880 次/秒，约 0.35 ms | 响应与中断次数均衡 |
+| HIGH | `96` | 约 120 次/秒，约 8.3 ms | 约 480 次/秒，约 2.1 ms | 约 960 次/秒，约 1.0 ms | 高波特率下降低中断次数 |
 
 ## 开发板说明
 
@@ -74,6 +101,7 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 
 - `ESP32S3` 分支面向一款 ESP32-S3 开发板，PlatformIO 板卡 ID 为 `esp32s3_120_16_8-qio_opi`
 - 默认 UART 引脚为 `RX=IO13`、`TX=IO14`；如果接线不同，可在 `platformio.ini` 中调整 `UART1_RX_PIN` 和 `UART1_TX_PIN`
+- 默认 UART FIFO 阈值为 HIGH（`UART_FIFO_THRESHOLD=96`），适合在 `460800`/`921600` 场景下降低中断次数
 - 状态灯是 `IO48` 上的 WS2812 RGB LED，通过 Arduino-ESP32 RGB LED 辅助函数驱动，不依赖 FastLED
 - ESP32-S3 分支默认使用静态 SRAM 桥接缓冲区，可通过 `USE_PSRAM_BRIDGE_BUFFERS=1` 切换为 PSRAM 分配
 - ESP32-S3 默认不配置 Wi-Fi 发射功率；如部署环境需要固定功率，可在 `platformio.ini` 中启用 `CONFIGURE_WIFI_TX_POWER=1` 并设置 `WIFI_TX_POWER`
@@ -83,6 +111,8 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 - `ESP32C3` 分支面向常见 ESP32-C3 SuperMini 开发板，PlatformIO 板卡 ID 为 `nologo_esp32c3_super_mini`
 - 默认 UART 引脚为 `RX=IO3`、`TX=IO4`；如果接线不同，可在 `platformio.ini` 中调整 `UART1_RX_PIN` 和 `UART1_TX_PIN`
 - 状态灯是 `IO8` 上的板载单色 LED，配置为低电平有效
+- 默认 UART FIFO 阈值为 MID（`UART_FIFO_THRESHOLD=32`），保证 `9600`/`115200` 响应速度，同时避免过高的中断次数
+- 当前固件使用默认 app 分区已经足够，不再使用 `huge_app.csv`
 - C3 构建使用固定静态 SRAM 桥接缓冲区，适合不带 PSRAM 的开发板长期稳定运行
 - Wi-Fi 发射功率默认限制为 `WIFI_POWER_8_5dBm`；这是针对常见 C3 SuperMini 开发板的有意配置，用于降低发热和功耗，并提升长期运行稳定性
 - Wi-Fi 信号问题常见于黑色 PCB 的 ESP32-C3 SuperMini 开发板。如果开发板无法连接 Wi-Fi，或附近设备看不到固件回退创建的 AP 信号，通常直接拆掉原装板载天线即可让设备恢复正常
@@ -92,6 +122,7 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 
 - `ESP32C6` 分支面向 Espressif ESP32-C6-DevKitC-1，PlatformIO 板卡 ID 为 `esp32-c6-devkitc-1`
 - 默认 UART 引脚为 `RX=IO10`、`TX=IO11`；如果接线不同，可在 `platformio.ini` 中调整 `UART1_RX_PIN` 和 `UART1_TX_PIN`
+- 默认 UART FIFO 阈值为 HIGH（`UART_FIFO_THRESHOLD=96`），与 ESP32-S3 的高波特率配置一致
 - `IO8` 上的板载可寻址 RGB LED 参考 ESP32-S3 分支的状态颜色：断网红色、AP 模式橙色、STA 已连接绿色、TCP 已连接紫色、数据活动蓝色脉冲、Wi-Fi 扫描时绿色闪烁
 - ESP32-C6 对普通应用暴露 1 个 FreeRTOS 主核，另有 1 个 LP core。LP core 适合低功耗唤醒和简单监测，不适合运行 Arduino 任务或分担 TCP/UART 桥接
 - 桥接缓冲区沿用 ESP32-C3 的静态 SRAM 模型，因为常见 ESP32-C6-DevKitC-1 板卡不带 PSRAM

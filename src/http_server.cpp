@@ -30,6 +30,40 @@ namespace {
 
 WebServer server(kHttpPort);
 
+bool parseUnsignedDecimal(const String &value, uint32_t &out) {
+  if (value.isEmpty()) {
+    return false;
+  }
+
+  uint32_t parsed = 0;
+  for (size_t i = 0; i < value.length(); ++i) {
+    const char ch = value[i];
+    if (ch < '0' || ch > '9') {
+      return false;
+    }
+
+    const uint32_t digit = static_cast<uint32_t>(ch - '0');
+    if (parsed > (UINT32_MAX - digit) / 10U) {
+      return false;
+    }
+
+    parsed = (parsed * 10U) + digit;
+  }
+
+  out = parsed;
+  return true;
+}
+
+bool requireAuthentication() {
+#if ENABLE_HTTP_AUTH
+  if (!server.authenticate(HTTP_AUTH_USERNAME, HTTP_AUTH_PASSWORD)) {
+    server.requestAuthentication(BASIC_AUTH, DEVICE_LABEL);
+    return false;
+  }
+#endif
+  return true;
+}
+
 /**
  * @brief 发送 JSON 响应
  * @param statusCode HTTP 状态码
@@ -80,6 +114,7 @@ void addWiFiProfilesJson(JsonDocument &doc) {
 
 /** @brief 向 JSON 文档填充最近一次 Wi-Fi 扫描结果 */
 void addWiFiScanResultsJson(JsonDocument &doc) {
+  doc["scanning"] = wifi_manager::scanInProgress();
   JsonArray networks = doc["networks"].to<JsonArray>();
   for (size_t i = 0; i < wifi_manager::scanResultCount(); ++i) {
     const WiFiScanResult &scanResult = wifi_manager::scanResult(i);
@@ -119,13 +154,35 @@ bool parseUartSettingsFromRequest(UartSettings &settings, String &error) {
     return false;
   }
 
-  const uint32_t baudRate = static_cast<uint32_t>(server.arg("baudRate").toInt());
-  const uint8_t dataBits = static_cast<uint8_t>(server.arg("dataBits").toInt());
+  uint32_t baudRate = 0;
+  uint32_t dataBitsValue = 0;
+  uint32_t stopBitsValue = 0;
+
+  if (!parseUnsignedDecimal(server.arg("baudRate"), baudRate)) {
+    error = "Baud rate must be a positive integer";
+    return false;
+  }
+
+  if (!parseUnsignedDecimal(server.arg("dataBits"), dataBitsValue) ||
+      !parseUnsignedDecimal(server.arg("stopBits"), stopBitsValue)) {
+    error = "UART data bits and stop bits must be positive integers";
+    return false;
+  }
+
   const String parityArg = server.arg("parity");
-  const uint8_t stopBits = static_cast<uint8_t>(server.arg("stopBits").toInt());
 
   if (baudRate < 300) {
     error = "Baud rate must be >= 300";
+    return false;
+  }
+
+  if (dataBitsValue < 5 || dataBitsValue > 8) {
+    error = "Data bits must be between 5 and 8";
+    return false;
+  }
+
+  if (stopBitsValue != 1 && stopBitsValue != 2) {
+    error = "Stop bits must be 1 or 2";
     return false;
   }
 
@@ -134,7 +191,11 @@ bool parseUartSettingsFromRequest(UartSettings &settings, String &error) {
     return false;
   }
 
-  settings = {baudRate, dataBits, static_cast<char>(toupper(parityArg[0])), stopBits};
+  settings = {
+      baudRate,
+      static_cast<uint8_t>(dataBitsValue),
+      static_cast<char>(toupper(parityArg[0])),
+      static_cast<uint8_t>(stopBitsValue)};
   uint32_t serialConfig = SERIAL_8N1;
   if (!uart_port::mapUartConfig(settings, serialConfig)) {
     error = "Unsupported UART framing combination";
@@ -157,8 +218,8 @@ bool parseProfileIndexArg(uint8_t &index, String &error) {
     return false;
   }
 
-  const int parsed = server.arg("index").toInt();
-  if (parsed < 0 || parsed >= kMaxWiFiProfiles) {
+  uint32_t parsed = 0;
+  if (!parseUnsignedDecimal(server.arg("index"), parsed) || parsed >= kMaxWiFiProfiles) {
     error = "Profile index out of range";
     return false;
   }
@@ -169,11 +230,17 @@ bool parseProfileIndexArg(uint8_t &index, String &error) {
 
 /** @brief GET / : 返回嵌入式配置网页 */
 void handleConfigPage() {
+  if (!requireAuthentication()) {
+    return;
+  }
   server.send(200, "text/html; charset=utf-8", FPSTR(kConfigPageHtml));
 }
 
 /** @brief GET /api/wifi : 返回 Wi-Fi 状态及 Profile 列表 */
 void handleGetWiFiProfiles() {
+  if (!requireAuthentication()) {
+    return;
+  }
   JsonDocument doc;
   addWiFiProfilesJson(doc);
   sendJsonDocument(200, doc);
@@ -181,6 +248,9 @@ void handleGetWiFiProfiles() {
 
 /** @brief GET /api/uart : 返回当前 UART 参数 */
 void handleGetUartSettings() {
+  if (!requireAuthentication()) {
+    return;
+  }
   JsonDocument doc;
   addUartSettingsJson(doc);
   sendJsonDocument(200, doc);
@@ -192,6 +262,9 @@ void handleGetUartSettings() {
  * 解析请求参数 → 校验合法性 → 调用 applySettings → 返回新参数。
  */
 void handleSetUartSettings() {
+  if (!requireAuthentication()) {
+    return;
+  }
   UartSettings requested = uart_port::settings();
   String error;
   if (!parseUartSettingsFromRequest(requested, error)) {
@@ -215,6 +288,9 @@ void handleSetUartSettings() {
  * 若请求中 activate=1，同时切换激活槽位并触发 Wi-Fi 重配置。
  */
 void handleSaveWiFiProfile() {
+  if (!requireAuthentication()) {
+    return;
+  }
   uint8_t index = 0;
   String error;
   if (!parseProfileIndexArg(index, error)) {
@@ -233,9 +309,20 @@ void handleSaveWiFiProfile() {
     return;
   }
 
-  // 密码为空时保留原槽位密码（渐进式修改）
+  if (ssid.length() > 32) {
+    sendJsonError(400, "Wi-Fi name must be at most 32 bytes");
+    return;
+  }
+
+  // 密码为空时默认兼容旧调用方保留旧密码；显式 keepPassword=0 时才清空。
   String password = server.arg("password");
-  if (password.isEmpty() && wifi_profiles::profileInUse(index)) {
+  if (password.length() > 64) {
+    sendJsonError(400, "Wi-Fi password must be at most 64 bytes");
+    return;
+  }
+
+  const bool keepExistingPassword = !server.hasArg("keepPassword") || server.arg("keepPassword") == "1";
+  if (password.isEmpty() && keepExistingPassword && wifi_profiles::profileInUse(index)) {
     password = wifi_profiles::profile(index).password;
   }
 
@@ -260,6 +347,9 @@ void handleSaveWiFiProfile() {
  * 激活后立即触发 Wi-Fi 重配置（标记方式，非立即执行）。
  */
 void handleActivateWiFiProfile() {
+  if (!requireAuthentication()) {
+    return;
+  }
   uint8_t index = 0;
   String error;
   if (!parseProfileIndexArg(index, error)) {
@@ -284,6 +374,9 @@ void handleActivateWiFiProfile() {
  * 若删除的是当前激活槽位，触发 Wi-Fi 重配置（切换到 AP fallback）。
  */
 void handleDeleteWiFiProfile() {
+  if (!requireAuthentication()) {
+    return;
+  }
   uint8_t index = 0;
   String error;
   if (!parseProfileIndexArg(index, error)) {
@@ -307,8 +400,21 @@ void handleDeleteWiFiProfile() {
   sendJsonDocument(200, doc);
 }
 
-/** @brief POST /api/wifi/scan : 触发 Wi-Fi 扫描并返回结果 */
+/** @brief GET /api/wifi/scan : 返回当前扫描状态和最近结果 */
+void handleGetWiFiScan() {
+  if (!requireAuthentication()) {
+    return;
+  }
+  JsonDocument doc;
+  addWiFiScanResultsJson(doc);
+  sendJsonDocument(200, doc);
+}
+
+/** @brief POST /api/wifi/scan : 触发异步 Wi-Fi 扫描并返回当前状态 */
 void handleScanWiFi() {
+  if (!requireAuthentication()) {
+    return;
+  }
   wifi_manager::scanNearby();
   JsonDocument doc;
   addWiFiScanResultsJson(doc);
@@ -317,6 +423,9 @@ void handleScanWiFi() {
 
 /** @brief 处理所有未匹配路由：返回 404 JSON 错误 */
 void handleNotFound() {
+  if (!requireAuthentication()) {
+    return;
+  }
   sendJsonError(404, "Not found");
 }
 
@@ -326,6 +435,7 @@ void begin() {
   // 注册所有路由
   server.on("/", HTTP_GET, handleConfigPage);
   server.on("/api/wifi", HTTP_GET, handleGetWiFiProfiles);
+  server.on("/api/wifi/scan", HTTP_GET, handleGetWiFiScan);
   server.on("/api/wifi/scan", HTTP_POST, handleScanWiFi);
   server.on("/api/wifi/save", HTTP_POST, handleSaveWiFiProfile);
   server.on("/api/wifi/activate", HTTP_POST, handleActivateWiFiProfile);
