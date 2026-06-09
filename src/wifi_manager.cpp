@@ -13,6 +13,7 @@
 #include "wifi_manager.h"
 #include "app_config.h"
 #include "debug_log.h"
+#include "rfc2217_bridge.h"
 #include "tcp_uart_bridge.h"
 #include "wifi_profiles.h"
 
@@ -108,11 +109,13 @@ void cancelScanIfNeeded() {
 /** @brief 停止 TCP Server（Wi-Fi 模式切换时调用） */
 void stopTcpServer() {
   bridge::stopTcpServer();
+  rfc2217_bridge::stopServer();
 }
 
 /** @brief 断开 TCP 客户端（Wi-Fi 切换时调用） */
 void disconnectTcpClient(const char *reason) {
   bridge::disconnectTcpClient(reason);
+  rfc2217_bridge::disconnectClient(reason);
 }
 
 /**
@@ -127,6 +130,9 @@ void startTcpServer() {
 
   if (bridge::startTcpServer()) {
     debugPrintf("TCP bridge listening on port %d\n", TCP_BRIDGE_PORT);
+  }
+  if (rfc2217_bridge::startServer()) {
+    debugPrintf("RFC2217 bridge listening on port %d\n", RFC2217_BRIDGE_PORT);
   }
 }
 
@@ -205,6 +211,9 @@ void startStationMode() {
   if (bridge::isTcpClientConnected()) {
     disconnectTcpClient("wifi profile change");
   }
+  if (rfc2217_bridge::isClientConnected()) {
+    disconnectTcpClient("wifi profile change");
+  }
   WiFi.disconnect(true, true);
   delay(100);
   WiFi.mode(WIFI_STA);
@@ -262,6 +271,9 @@ void handleAccessPointStationRetry() {
     debugPrintln("STA recovered from AP fallback");
     cancelScanIfNeeded();
     if (bridge::isTcpClientConnected()) {
+      disconnectTcpClient("sta recovered from ap fallback");
+    }
+    if (rfc2217_bridge::isClientConnected()) {
       disconnectTcpClient("sta recovered from ap fallback");
     }
     stopTcpServer();
@@ -341,6 +353,9 @@ void handleStationMode() {
     if (bridge::isTcpClientConnected()) {
       disconnectTcpClient("wifi lost");
     }
+    if (rfc2217_bridge::isClientConnected()) {
+      disconnectTcpClient("wifi lost");
+    }
   }
 
   if (!connected && millis() - lastWifiReconnectAttemptMs >= kWifiReconnectIntervalMs) {
@@ -380,6 +395,9 @@ void applyPendingReconfigureIfNeeded() {
 
   stopTcpServer();
   if (bridge::isTcpClientConnected()) {
+    disconnectTcpClient("wifi profile removed");
+  }
+  if (rfc2217_bridge::isClientConnected()) {
     disconnectTcpClient("wifi profile removed");
   }
   stopStationBeforeAccessPoint();

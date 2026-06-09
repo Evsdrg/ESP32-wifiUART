@@ -33,6 +33,9 @@ void markWifiReconnect();
 /** @brief 返回最近一次通信活动的时间戳（millis） */
 uint32_t lastActivityMs();
 
+/** @brief 记录一次桥接活动（供状态灯和统计使用） */
+void markActivity();
+
 /** @brief 启动 TCP Server（端口由 TCP_BRIDGE_PORT 指定） */
 bool startTcpServer();
 

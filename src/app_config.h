@@ -83,6 +83,26 @@ static_assert(!ENABLE_HTTP_AUTH || sizeof(HTTP_AUTH_PASSWORD) > 1,
 #define TCP_BRIDGE_PORT 6638
 #endif
 
+#ifndef ENABLE_RFC2217_BRIDGE
+#define ENABLE_RFC2217_BRIDGE 1
+#endif
+
+#ifndef RFC2217_BRIDGE_PORT
+#define RFC2217_BRIDGE_PORT 2217
+#endif
+
+#ifndef UART_BRIDGE_DTR_PIN
+#define UART_BRIDGE_DTR_PIN -1
+#endif
+
+#ifndef UART_BRIDGE_RTS_PIN
+#define UART_BRIDGE_RTS_PIN -1
+#endif
+
+#ifndef UART_BRIDGE_CONTROL_ACTIVE_LOW
+#define UART_BRIDGE_CONTROL_ACTIVE_LOW 1
+#endif
+
 #ifndef CONFIGURE_WIFI_TX_POWER
 #define CONFIGURE_WIFI_TX_POWER 0
 #endif
@@ -129,6 +149,8 @@ static_assert(UART_FIFO_THRESHOLD >= 1 && UART_FIFO_THRESHOLD <= 127,
 constexpr size_t kIoChunkSize = 256;
 constexpr size_t kPendingTcpToUartBytes = 12288;
 constexpr size_t kPendingUartToTcpBytes = 20480;
+constexpr size_t kRfc2217PendingTcpToUartBytes = 4096;
+constexpr size_t kRfc2217PendingUartToTcpBytes = 4096;
 constexpr size_t kUartDriverRxBufferSize = 8192;
 constexpr size_t kUartDriverTxBufferSize = 4096;
 constexpr uint8_t kMaxWiFiProfiles = 24;

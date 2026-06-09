@@ -21,6 +21,7 @@ ESP WiFi UART Bridge 是一个通过 Wi-Fi 暴露 TCP 套接字，并将其桥�
 - 提供 Web 配置页面，可管理 UART 参数和 Wi-Fi 配置组
 - 支持 Wi-Fi STA 模式，启动时 STA 连接超时会自动回退到 AP 模式
 - TCP 桥接服务端口为 `6638`
+- RFC2217 远程串口服务端口为 `2217`，用于 `esptool.py` 等需要 DTR/RTS 的工具
 - 支持通过 `platformio.ini` 进行可选的构建时 Wi-Fi 初始化
 - 支持通过 `socat` 在 Linux 下映射为伪串口
 
@@ -70,11 +71,44 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 
 然后在你的串口软件中使用 `/dev/ttyESP32` 进行通信。
 
+原始 TCP 端口上的 `socat` 只传输 UART 字节，不会转发 DTR/RTS 这类 modem-control 事件。
+
+## RFC2217 远程烧录
+
+固件还会在 `2217` 端口提供 RFC2217 服务。支持 pyserial 的工具应直接使用该 URL，不需要再套一层 `socat`：
+
+```bash
+esptool.py --chip esp32c3 --port rfc2217://<ESP32_IP>:2217 --baud 460800 write_flash 0x0 firmware.bin
+```
+
+ESP 自动复位/进下载模式的接线方式：
+
+- 桥接板 `TX` -> 目标板 `RX`
+- 桥接板 `RX` -> 目标板 `TX`
+- 桥接板 `DTR` GPIO -> 目标板 `GPIO0` / `BOOT`
+- 桥接板 `RTS` GPIO -> 目标板 `EN` / `RST`
+- 两块板共地
+
+RFC2217 服务默认开启，但 DTR/RTS 输出引脚默认为 `-1`，不会实际驱动任何 GPIO。需要按你的接线在 `platformio.ini` 中设置：
+
+```ini
+; -D UART_BRIDGE_DTR_PIN=0
+; -D UART_BRIDGE_RTS_PIN=1
+; -D UART_BRIDGE_CONTROL_ACTIVE_LOW=1
+```
+
+如果某些客户端对标准 RFC2217 控制 ACK 兼容性不好，pyserial 也支持：
+
+```bash
+esptool.py --chip esp32c3 --port rfc2217://<ESP32_IP>:2217?ign_set_control --baud 460800 write_flash 0x0 firmware.bin
+```
+
 ## 配置说明
 
 - Wi-Fi 凭据可通过 Web 界面写入，并保存在 NVS Preferences 中
 - 最多支持 24 组 Wi-Fi 配置
 - 桥接缓冲区为 TCP->UART `12KB`、UART->TCP `20KB`；UART 驱动内部缓冲为 RX `8KB`、TX `4KB`
+- RFC2217 使用单独的 TCP->UART `4KB` 和 UART->TCP `4KB` 缓冲区，烧录/控制会话不会和原始 TCP 桥接共用缓冲
 - `platformio.ini` 有意按 S3/C3/C6 分成独立环境段，而不是依赖隐式的分支配置
 - UART RX FIFO 阈值可通过 `UART_FIFO_THRESHOLD` 调整；当前 C3 使用 MID=`32`，S3/C6 使用 HIGH=`96`
 

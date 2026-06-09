@@ -11,6 +11,7 @@
 #include "app_config.h"
 #include "debug_log.h"
 #include "http_server.h"
+#include "rfc2217_bridge.h"
 #include "status_led.h"
 #include "tcp_uart_bridge.h"
 #include "uart_port.h"
@@ -35,7 +36,7 @@ void showStatusLed() {
   StatusLedSnapshot snapshot;
   snapshot.wifiConnected = wifi_manager::wifiConnected();
   snapshot.accessPointActive = wifi_manager::accessPointActive();
-  snapshot.tcpClientConnected = bridge::isTcpClientConnected();
+  snapshot.tcpClientConnected = bridge::isTcpClientConnected() || rfc2217_bridge::isClientConnected();
   snapshot.wifiScanInProgress = wifi_manager::scanInProgress();
   snapshot.lastActivityAtMs = bridge::lastActivityMs();
   updateStatusLed(snapshot);
@@ -59,6 +60,12 @@ void setup() {
   // 初始化 TCP↔UART 环形缓冲区；分配失败时重启
   if (!bridge::beginBuffers()) {
     debugPrintln("Failed to allocate bridge buffers. Restarting in 2 seconds.");
+    delay(2000);
+    ESP.restart();
+  }
+
+  if (!rfc2217_bridge::beginBuffers()) {
+    debugPrintln("Failed to allocate RFC2217 buffers. Restarting in 2 seconds.");
     delay(2000);
     ESP.restart();
   }
@@ -106,16 +113,22 @@ void loop() {
   // 应用待处理的 Wi-Fi 重配置（Profile 切换后触发）
   wifi_manager::applyPendingReconfigureIfNeeded();
 
-  // TCP Server 接受新客户端
-  bridge::acceptClientIfNeeded();
+  // RFC2217 与原始 TCP 桥接互斥使用同一个 UART
+  rfc2217_bridge::acceptClientIfNeeded();
+  if (rfc2217_bridge::isClientConnected()) {
+    rfc2217_bridge::handleClient(uart_port::serial());
+  } else {
+    // TCP Server 接受新客户端
+    bridge::acceptClientIfNeeded();
 
-  // TCP → UART 数据通路
-  bridge::pullTcpIntoBuffer();
-  bridge::flushTcpBufferToUart(uart_port::serial());
+    // TCP → UART 数据通路
+    bridge::pullTcpIntoBuffer();
+    bridge::flushTcpBufferToUart(uart_port::serial());
 
-  // UART → TCP 数据通路
-  bridge::pullUartIntoBuffer(uart_port::serial());
-  bridge::flushUartBufferToTcp();
+    // UART → TCP 数据通路
+    bridge::pullUartIntoBuffer(uart_port::serial());
+    bridge::flushUartBufferToTcp();
+  }
 
   // 定期打印桥接统计信息
   bridge::logStatsIfNeeded(

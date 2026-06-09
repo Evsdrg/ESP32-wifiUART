@@ -21,6 +21,7 @@ Check out the branch that matches your hardware before building or flashing.
 - Web configuration page for UART parameters and Wi-Fi profile management
 - Wi-Fi station mode with automatic fallback to AP mode when the initial STA connection times out
 - TCP bridge service on port `6638`
+- RFC2217 remote serial service on port `2217` for tools that need DTR/RTS, such as `esptool.py`
 - Optional build-time Wi-Fi seeding through `platformio.ini`
 - Linux pseudo-serial access through `socat`
 
@@ -70,11 +71,44 @@ sudo socat -d -d pty,raw,echo=0,mode=666,link=/dev/ttyESP32 tcp:<ESP32_IP>:6638
 
 Then point your serial software to `/dev/ttyESP32`.
 
+`socat` over the raw TCP port only transports UART bytes. It does not forward DTR/RTS modem-control events.
+
+## RFC2217 Remote Flashing
+
+The firmware also exposes an RFC2217 endpoint on port `2217`. Use it directly with pyserial-aware tools instead of wrapping it in `socat`:
+
+```bash
+esptool.py --chip esp32c3 --port rfc2217://<ESP32_IP>:2217 --baud 460800 write_flash 0x0 firmware.bin
+```
+
+For ESP auto-reset wiring, connect the bridge board and target board like this:
+
+- Bridge `TX` -> target `RX`
+- Bridge `RX` -> target `TX`
+- Bridge `DTR` GPIO -> target `GPIO0` / `BOOT`
+- Bridge `RTS` GPIO -> target `EN` / `RST`
+- Common ground between both boards
+
+The RFC2217 service is enabled by default, but DTR/RTS output pins default to `-1` and do not drive any GPIO until configured. Set these build flags in `platformio.ini` for your wiring:
+
+```ini
+; -D UART_BRIDGE_DTR_PIN=0
+; -D UART_BRIDGE_RTS_PIN=1
+; -D UART_BRIDGE_CONTROL_ACTIVE_LOW=1
+```
+
+If a specific client ignores normal RFC2217 control acknowledgements poorly, pyserial also supports:
+
+```bash
+esptool.py --chip esp32c3 --port rfc2217://<ESP32_IP>:2217?ign_set_control --baud 460800 write_flash 0x0 firmware.bin
+```
+
 ## Configuration Notes
 
 - Wi-Fi credentials can be provisioned from the web UI and are stored in NVS Preferences
 - Up to 24 Wi-Fi profiles are supported
 - Bridge buffers are `12KB` for TCP->UART and `20KB` for UART->TCP; UART driver buffers are `8KB` RX and `4KB` TX
+- RFC2217 uses separate `4KB` TCP->UART and `4KB` UART->TCP buffers so flashing/control sessions do not share raw TCP bridge buffers
 - `platformio.ini` is intentionally split into separate S3/C3/C6 environment sections instead of relying on implicit branch-only settings
 - UART RX FIFO threshold is configurable with `UART_FIFO_THRESHOLD`; current presets are MID=`32` for C3 and HIGH=`96` for S3/C6
 
