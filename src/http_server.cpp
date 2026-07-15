@@ -30,30 +30,6 @@ namespace {
 
 WebServer server(kHttpPort);
 
-bool parseUnsignedDecimal(const String &value, uint32_t &out) {
-  if (value.isEmpty()) {
-    return false;
-  }
-
-  uint32_t parsed = 0;
-  for (size_t i = 0; i < value.length(); ++i) {
-    const char ch = value[i];
-    if (ch < '0' || ch > '9') {
-      return false;
-    }
-
-    const uint32_t digit = static_cast<uint32_t>(ch - '0');
-    if (parsed > (UINT32_MAX - digit) / 10U) {
-      return false;
-    }
-
-    parsed = (parsed * 10U) + digit;
-  }
-
-  out = parsed;
-  return true;
-}
-
 bool requireAuthentication() {
 #if ENABLE_HTTP_AUTH
   if (!server.authenticate(HTTP_AUTH_USERNAME, HTTP_AUTH_PASSWORD)) {
