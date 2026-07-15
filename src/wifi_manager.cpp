@@ -18,6 +18,7 @@
 #include "wifi_profiles.h"
 
 #include <WiFi.h>
+#include <esp_wifi.h>
 
 namespace wifi_uart {
 namespace wifi_manager {
@@ -44,12 +45,16 @@ bool stationRetryAttemptActive = false;
 
 /** @brief Wi-Fi 扫描是否进行中 */
 bool scanInProgressFlag = false;
+bool scanFailedFlag = false;
 
 /** @brief 当前 Wi-Fi 扫描开始时间，用于超时恢复 */
 uint32_t scanStartedAtMs = 0;
 
 /** @brief 是否有待处理的 Wi-Fi 重配置请求 */
 bool pendingReconfigure = false;
+
+/** @brief 最近一次 Wi-Fi 重配置请求时间，用于让 HTTP 响应先发出 */
+uint32_t pendingReconfigureRequestedAtMs = 0;
 
 /** @brief 最近一次 Wi-Fi 扫描结果缓存 */
 WiFiScanResult scanResults[kMaxWiFiProfiles] = {};
@@ -67,8 +72,37 @@ void updateStatus() {
   }
 }
 
+bool setWiFiMode(wifi_mode_t mode) {
+  if (!WiFi.mode(mode)) {
+    debugPrintf("Failed to set WiFi mode: %d\n", static_cast<int>(mode));
+    return false;
+  }
+
+  if (mode != WIFI_MODE_NULL) {
+    if (!WiFi.setSleep(false)) {
+      debugPrintln("Failed to disable WiFi sleep");
+    }
+#if CONFIGURE_WIFI_TX_POWER
+    if (!WiFi.setTxPower(kWifiTxPower)) {
+      debugPrintln("Failed to configure WiFi TX power");
+    }
+#endif
+  }
+  return true;
+}
+
+void stopAndDeleteScan() {
+  const esp_err_t stopResult = esp_wifi_scan_stop();
+  if (stopResult != ESP_OK && stopResult != ESP_ERR_WIFI_NOT_INIT &&
+      stopResult != ESP_ERR_WIFI_NOT_STARTED && stopResult != ESP_ERR_WIFI_STATE) {
+    debugPrintf("Failed to stop WiFi scan: %s\n", esp_err_to_name(stopResult));
+  }
+  WiFi.scanDelete();
+}
+
 /** @brief 结束一次异步扫描并缓存结果 */
 void finishScan(int16_t count) {
+  scanFailedFlag = count < 0;
   scanResultCountValue = 0;
 
   if (count > 0) {
@@ -85,7 +119,7 @@ void finishScan(int16_t count) {
   WiFi.scanDelete();
 
   if (accessPointActiveFlag && !stationRetryAttemptActive) {
-    WiFi.mode(WIFI_AP);
+    setWiFiMode(WIFI_AP);
   }
 
   scanInProgressFlag = false;
@@ -99,7 +133,7 @@ void cancelScanIfNeeded() {
     return;
   }
 
-  WiFi.scanDelete();
+  stopAndDeleteScan();
   scanInProgressFlag = false;
   scanStartedAtMs = 0;
   scanResultCountValue = 0;
@@ -156,7 +190,9 @@ void startAccessPoint() {
   accessPointActiveFlag = false;
   retryStationFromAccessPointFlag = false;
   stationRetryAttemptActive = false;
-  WiFi.mode(WIFI_AP);
+  if (!setWiFiMode(WIFI_AP)) {
+    return;
+  }
 
   if (!WiFi.softAP(AP_SSID, AP_PASSWORD)) {
     debugPrintln("Failed to start WiFi AP");
@@ -184,7 +220,7 @@ void stopStationBeforeAccessPoint() {
   WiFi.setAutoReconnect(false);
   WiFi.disconnect(false, false);
   delay(100);
-  WiFi.mode(WIFI_MODE_NULL);
+  setWiFiMode(WIFI_MODE_NULL);
   delay(100);
 }
 
@@ -216,7 +252,10 @@ void startStationMode() {
   }
   WiFi.disconnect(true, true);
   delay(100);
-  WiFi.mode(WIFI_STA);
+  if (!setWiFiMode(WIFI_STA)) {
+    useStationModeFlag = false;
+    return;
+  }
   WiFi.setAutoReconnect(true);
   WiFi.begin(activeProfile->ssid.c_str(), activeProfile->password.c_str());
   lastWifiReconnectAttemptMs = millis();
@@ -279,7 +318,13 @@ void handleAccessPointStationRetry() {
     stopTcpServer();
     WiFi.softAPdisconnect(true);
     delay(100);
-    WiFi.mode(WIFI_STA);
+    if (!setWiFiMode(WIFI_STA)) {
+      startAccessPoint();
+      retryStationFromAccessPointFlag = true;
+      lastWifiReconnectAttemptMs = millis();
+      startTcpServer();
+      return;
+    }
     WiFi.setAutoReconnect(true);
     accessPointActiveFlag = false;
     useStationModeFlag = true;
@@ -298,7 +343,10 @@ void handleAccessPointStationRetry() {
   }
 
   debugPrintln("Retrying WiFi connection from AP fallback");
-  WiFi.mode(WIFI_AP_STA);
+  if (!setWiFiMode(WIFI_AP_STA)) {
+    lastWifiReconnectAttemptMs = millis();
+    return;
+  }
   WiFi.disconnect(false, false);
   WiFi.begin(activeProfile->ssid.c_str(), activeProfile->password.c_str());
   stationRetryAttemptActive = true;
@@ -373,6 +421,7 @@ void handleStationMode() {
 
 void requestReconfigure() {
   pendingReconfigure = true;
+  pendingReconfigureRequestedAtMs = millis();
 }
 
 /**
@@ -382,11 +431,13 @@ void requestReconfigure() {
  * 在主循环中执行，而非 HTTP handler 回调中（避免 Wi-Fi 操作阻塞 HTTP 响应）。
  */
 void applyPendingReconfigureIfNeeded() {
-  if (!pendingReconfigure) {
+  if (!pendingReconfigure ||
+      millis() - pendingReconfigureRequestedAtMs < kWifiReconfigureGraceMs) {
     return;
   }
 
   pendingReconfigure = false;
+  pendingReconfigureRequestedAtMs = 0;
   if (wifi_profiles::active() != nullptr) {
     startStationMode();
     waitForInitialStationConnection();
@@ -415,6 +466,10 @@ bool accessPointActive() {
 
 bool scanInProgress() {
   return scanInProgressFlag;
+}
+
+bool scanFailed() {
+  return scanFailedFlag;
 }
 
 bool useStationMode() {
@@ -470,12 +525,19 @@ void scanNearby() {
   }
 
   scanInProgressFlag = true;
+  scanFailedFlag = false;
   scanStartedAtMs = millis();
   scanResultCountValue = 0;
   updateStatus();
 
   if (accessPointActiveFlag) {
-    WiFi.mode(WIFI_AP_STA);
+    if (!setWiFiMode(WIFI_AP_STA)) {
+      scanInProgressFlag = false;
+      scanFailedFlag = true;
+      scanStartedAtMs = 0;
+      updateStatus();
+      return;
+    }
   }
 
   const int16_t count = WiFi.scanNetworks(true, true);
@@ -495,6 +557,7 @@ void pollScan() {
   if (count == WIFI_SCAN_RUNNING) {
     if (millis() - scanStartedAtMs >= kWifiScanTimeoutMs) {
       debugPrintln("WiFi scan timed out");
+      stopAndDeleteScan();
       finishScan(WIFI_SCAN_FAILED);
     }
     return;

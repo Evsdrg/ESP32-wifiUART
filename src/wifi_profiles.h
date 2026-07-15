@@ -30,6 +30,7 @@ const WiFiProfile *active();
 
 /** @brief 当前激活的槽位编号（-1 表示无激活） */
 int8_t activeIndex();
+bool ready();
 
 /**
  * @brief 切换激活的凭据槽位
@@ -54,10 +55,14 @@ bool profileInUse(uint8_t index);
  * @param password  密码（可为空字符串，表示开放网络或清空密码）
  * @return true 保存成功
  */
-bool save(uint8_t index, const String &ssid, const String &password);
+bool save(
+    uint8_t index,
+    const String &ssid,
+    const String &password,
+    bool activate);
 
 /** @brief 删除指定槽位的凭据（同时清除激活状态） */
-void remove(uint8_t index);
+bool remove(uint8_t index);
 
 }
 }

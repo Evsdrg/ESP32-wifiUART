@@ -7,3 +7,4 @@
 .vscode/ipch
 compile_commands.json
 tools/wifiuart-tty
+tools/wifiuart-tty-test

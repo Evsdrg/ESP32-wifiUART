@@ -19,7 +19,6 @@
 #include "wifi_profiles.h"
 
 #include <Arduino.h>
-#include <WiFi.h>
 
 namespace wifi_uart {
 namespace app {
@@ -50,11 +49,9 @@ void setup() {
     Serial.begin(kDebugBaudRate);
   }
 
-  // 初始化 NVS Wi-Fi 凭据存储；失败时重启
+  // 损坏或不可读的 Wi-Fi 配置保持锁定状态，继续启动 AP 供显式修复。
   if (!wifi_profiles::begin()) {
-    debugPrintln("Failed to initialize Preferences. Restarting in 2 seconds.");
-    delay(2000);
-    ESP.restart();
+    debugPrintln("Wi-Fi profile storage unavailable; starting with no active profile");
   }
 
   // 初始化 TCP↔UART 环形缓冲区；分配失败时重启
@@ -79,12 +76,6 @@ void setup() {
 
   initStatusLed();
   showStatusLed();
-
-  // 关闭 Wi-Fi 睡眠以降低延迟；可选配置发射功率
-  WiFi.setSleep(false);
-#if CONFIGURE_WIFI_TX_POWER
-  WiFi.setTxPower(kWifiTxPower);
-#endif
 
   // 启动 Wi-Fi 管理器（内部启动 TCP Server）和 HTTP 服务器
   wifi_manager::begin(showStatusLed);
@@ -121,13 +112,17 @@ void loop() {
   }
 
   // RFC2217 与原始 TCP 桥接互斥使用同一个 UART
-  rfc2217_bridge::acceptClientIfNeeded(uartPort);
-  if (rfc2217_bridge::isClientConnected()) {
+  const bool uartRunning = uart_port::isRunning();
+  if (!uartRunning && rfc2217_bridge::isClientConnected()) {
+    rfc2217_bridge::disconnectClient("UART unavailable");
+  }
+  rfc2217_bridge::acceptClientIfNeeded(uartPort, uartRunning);
+  bridge::acceptClientIfNeeded(
+      uartPort,
+      uartRunning && !rfc2217_bridge::isClientConnected());
+  if (uartRunning && rfc2217_bridge::isClientConnected()) {
     rfc2217_bridge::handleClient(uartPort);
-  } else {
-    // TCP Server 接受新客户端
-    bridge::acceptClientIfNeeded();
-
+  } else if (uartRunning) {
     // TCP → UART 数据通路
     bridge::pullTcpIntoBuffer();
     bridge::flushTcpBufferToUart(uartPort);

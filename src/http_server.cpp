@@ -15,6 +15,8 @@
 #include "http_server.h"
 #include "app_config.h"
 #include "debug_log.h"
+#include "rfc2217_bridge.h"
+#include "tcp_uart_bridge.h"
 #include "uart_port.h"
 #include "web_page.h"
 #include "wifi_manager.h"
@@ -22,6 +24,7 @@
 
 #include <ArduinoJson.h>
 #include <WebServer.h>
+#include <soc/soc_caps.h>
 
 namespace wifi_uart {
 namespace http_server {
@@ -92,6 +95,7 @@ void sendJsonError(int statusCode, const String &message) {
  * 包含：激活索引、连接状态、AP 状态、IP、SSID、以及所有已用槽位列表。
  */
 void addWiFiProfilesJson(JsonDocument &doc) {
+  doc["storageReady"] = wifi_profiles::ready();
   const bool wifiConnected = wifi_manager::wifiConnected();
   doc["activeIndex"] = wifi_profiles::activeIndex();
   doc["connected"] = wifiConnected;
@@ -115,6 +119,7 @@ void addWiFiProfilesJson(JsonDocument &doc) {
 /** @brief 向 JSON 文档填充最近一次 Wi-Fi 扫描结果 */
 void addWiFiScanResultsJson(JsonDocument &doc) {
   doc["scanning"] = wifi_manager::scanInProgress();
+  doc["failed"] = wifi_manager::scanFailed();
   JsonArray networks = doc["networks"].to<JsonArray>();
   for (size_t i = 0; i < wifi_manager::scanResultCount(); ++i) {
     const WiFiScanResult &scanResult = wifi_manager::scanResult(i);
@@ -171,8 +176,8 @@ bool parseUartSettingsFromRequest(UartSettings &settings, String &error) {
 
   const String parityArg = server.arg("parity");
 
-  if (baudRate < 300) {
-    error = "Baud rate must be >= 300";
+  if (baudRate < 300 || baudRate > SOC_UART_BITRATE_MAX) {
+    error = "Baud rate must be between 300 and " + String(SOC_UART_BITRATE_MAX);
     return false;
   }
 
@@ -265,6 +270,10 @@ void handleSetUartSettings() {
   if (!requireAuthentication()) {
     return;
   }
+  if (bridge::isTcpClientConnected() || rfc2217_bridge::isClientConnected()) {
+    sendJsonError(409, "Cannot change UART settings while a bridge session is active");
+    return;
+  }
   UartSettings requested = uart_port::settings();
   String error;
   if (!parseUartSettingsFromRequest(requested, error)) {
@@ -272,8 +281,8 @@ void handleSetUartSettings() {
     return;
   }
 
-  if (!uart_port::applySettings(requested)) {
-    sendJsonError(400, "Failed to apply UART settings");
+  if (!uart_port::applySettings(requested, nullptr, 1000)) {
+    sendJsonError(500, "Failed to apply UART settings");
     return;
   }
 
@@ -321,24 +330,42 @@ void handleSaveWiFiProfile() {
     return;
   }
 
-  const bool keepExistingPassword = !server.hasArg("keepPassword") || server.arg("keepPassword") == "1";
-  if (password.isEmpty() && keepExistingPassword && wifi_profiles::profileInUse(index)) {
-    password = wifi_profiles::profile(index).password;
+  if (server.hasArg("keepPassword") && server.arg("keepPassword") != "0" &&
+      server.arg("keepPassword") != "1") {
+    sendJsonError(400, "keepPassword must be 0 or 1");
+    return;
   }
-
-  if (!wifi_profiles::save(index, ssid, password)) {
-    sendJsonError(500, "Failed to save Wi-Fi profile");
+  if (server.hasArg("activate") && server.arg("activate") != "0" &&
+      server.arg("activate") != "1") {
+    sendJsonError(400, "activate must be 0 or 1");
     return;
   }
 
-  if (server.arg("activate") == "1") {
-    wifi_profiles::setActiveIndex(static_cast<int8_t>(index));
-    wifi_manager::requestReconfigure();  // 标记，等待主 loop 执行
+  const bool keepExistingPassword =
+      !server.hasArg("keepPassword") || server.arg("keepPassword") == "1";
+  if (password.isEmpty() && keepExistingPassword && wifi_profiles::profileInUse(index)) {
+    if (wifi_profiles::profile(index).ssid != ssid) {
+      sendJsonError(400, "Password can only be kept when the Wi-Fi name is unchanged");
+      return;
+    }
+    password = wifi_profiles::profile(index).password;
+  } else if (password.isEmpty() && keepExistingPassword && server.hasArg("keepPassword")) {
+    sendJsonError(400, "No saved password exists for this slot");
+    return;
+  }
+
+  const bool activate = server.arg("activate") == "1";
+  if (!wifi_profiles::save(index, ssid, password, activate)) {
+    sendJsonError(500, "Failed to save Wi-Fi profile");
+    return;
   }
 
   JsonDocument doc;
   addWiFiProfilesJson(doc);
   sendJsonDocument(200, doc);
+  if (activate) {
+    wifi_manager::requestReconfigure();
+  }
 }
 
 /**
@@ -362,10 +389,10 @@ void handleActivateWiFiProfile() {
     return;
   }
 
-  wifi_manager::requestReconfigure();
   JsonDocument doc;
   addWiFiProfilesJson(doc);
   sendJsonDocument(200, doc);
+  wifi_manager::requestReconfigure();
 }
 
 /**
@@ -390,14 +417,17 @@ void handleDeleteWiFiProfile() {
   }
 
   const bool deletedActiveProfile = wifi_profiles::activeIndex() == static_cast<int8_t>(index);
-  wifi_profiles::remove(index);
-  if (deletedActiveProfile) {
-    wifi_manager::requestReconfigure();
+  if (!wifi_profiles::remove(index)) {
+    sendJsonError(500, "Failed to delete Wi-Fi profile");
+    return;
   }
 
   JsonDocument doc;
   addWiFiProfilesJson(doc);
   sendJsonDocument(200, doc);
+  if (deletedActiveProfile) {
+    wifi_manager::requestReconfigure();
+  }
 }
 
 /** @brief GET /api/wifi/scan : 返回当前扫描状态和最近结果 */

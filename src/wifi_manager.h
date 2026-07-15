@@ -44,6 +44,7 @@ bool accessPointActive();
 
 /** @brief Wi-Fi 扫描是否正在进行 */
 bool scanInProgress();
+bool scanFailed();
 
 /** @brief 当前是否工作在 STA 模式 */
 bool useStationMode();

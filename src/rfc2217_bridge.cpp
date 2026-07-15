@@ -18,7 +18,9 @@
 #include "uart_port.h"
 
 #include <WiFi.h>
+#include <cerrno>
 #include <cinttypes>
+#include <sys/socket.h>
 
 namespace wifi_uart {
 namespace rfc2217_bridge {
@@ -48,6 +50,7 @@ constexpr uint8_t kNotifyModemState = 0x07;
 constexpr uint8_t kSetLineStateMask = 0x0A;
 constexpr uint8_t kSetModemStateMask = 0x0B;
 constexpr uint8_t kPurgeData = 0x0C;
+constexpr uint8_t kResumeAfterFlush = 0x63;
 
 constexpr uint8_t kServerSetBaudRate = 0x65;
 constexpr uint8_t kServerSetDataSize = 0x66;
@@ -88,26 +91,62 @@ enum class TelnetState : uint8_t {
 
 #if ENABLE_RFC2217_BRIDGE
 WiFiServer rfcServer(RFC2217_BRIDGE_PORT);
+WiFiServer flushControlServer(RFC2217_FLUSH_CONTROL_PORT);
 WiFiClient rfcClient;
+WiFiClient flushControlClient;
 
 uint8_t tcpToUartStorage[kRfc2217PendingTcpToUartBytes] = {};
 uint8_t uartToTcpStorage[kRfc2217PendingUartToTcpBytes] = {};
+uint8_t controlToTcpStorage[kRfc2217ControlToTcpBytes] = {};
 ByteRingBuffer tcpToUartBuffer;
 ByteRingBuffer uartToTcpBuffer;
+ByteRingBuffer controlToTcpBuffer;
 #endif
 
 bool rfcServerStarted = false;
 bool rfcClientActive = false;
-bool pendingEscapedIacByte = false;
+bool flushControlClientActive = false;
+bool dropTcpDataUntilResume = false;
+uint32_t flushToken = 0;
+uint8_t flushRequest[9] = {};
+size_t flushRequestLength = 0;
+uint8_t flushAck[10] = {};
+size_t flushAckLength = 0;
+size_t flushAckOffset = 0;
 bool dtrActive = false;
 bool rtsActive = false;
 bool breakActive = false;
+bool suboptionReady = false;
+bool protocolTxOverflow = false;
 uint8_t lineStateMask = 0;
 uint8_t modemStateMask = 0xFF;
 TelnetState telnetState = TelnetState::Normal;
 uint8_t negotiationCommand = 0;
 uint8_t suboption[16] = {};
 size_t suboptionLength = 0;
+uint8_t localOptionEnabled = 0;
+uint8_t localOptionRequested = 0;
+uint8_t remoteOptionEnabled = 0;
+uint8_t remoteOptionRequested = 0;
+uint8_t encodedUartChunk[kIoChunkSize * 2] = {};
+size_t encodedUartLength = 0;
+size_t encodedUartOffset = 0;
+size_t encodedUartRawBytes = 0;
+
+uint8_t telnetOptionBit(uint8_t option) {
+  switch (option) {
+    case kTelnetOptionBinary:
+      return 1U << 0;
+    case kTelnetOptionEcho:
+      return 1U << 1;
+    case kTelnetOptionSuppressGoAhead:
+      return 1U << 2;
+    case kTelnetOptionComPort:
+      return 1U << 3;
+    default:
+      return 0;
+  }
+}
 
 bool isSupportedLocalOption(uint8_t option) {
   return option == kTelnetOptionEcho || option == kTelnetOptionSuppressGoAhead ||
@@ -120,10 +159,23 @@ bool isSupportedRemoteOption(uint8_t option) {
 }
 
 void resetProtocolState() {
-  pendingEscapedIacByte = false;
   telnetState = TelnetState::Normal;
   negotiationCommand = 0;
   suboptionLength = 0;
+  suboptionReady = false;
+  protocolTxOverflow = false;
+  localOptionEnabled = 0;
+  localOptionRequested = 0;
+  remoteOptionEnabled = 0;
+  remoteOptionRequested = 0;
+  lineStateMask = 0;
+  modemStateMask = 0xFF;
+  breakActive = false;
+  dropTcpDataUntilResume = false;
+  flushToken = 0;
+  flushRequestLength = 0;
+  flushAckLength = 0;
+  flushAckOffset = 0;
 }
 
 void clearTcpToUartBuffer() {
@@ -136,41 +188,59 @@ void clearUartToTcpBuffer() {
 #if ENABLE_RFC2217_BRIDGE
   uartToTcpBuffer.clear();
 #endif
-  pendingEscapedIacByte = false;
+  encodedUartLength = 0;
+  encodedUartOffset = 0;
+  encodedUartRawBytes = 0;
 }
 
 void clearSessionBuffers() {
   clearTcpToUartBuffer();
   clearUartToTcpBuffer();
+#if ENABLE_RFC2217_BRIDGE
+  controlToTcpBuffer.clear();
+#endif
+}
+
+bool enqueueControlBytes(const uint8_t *data, size_t size) {
+#if ENABLE_RFC2217_BRIDGE
+  if (controlToTcpBuffer.freeSpace() < size ||
+      controlToTcpBuffer.push(data, size) != size) {
+    protocolTxOverflow = true;
+    return false;
+  }
+  return true;
+#else
+  (void)data;
+  (void)size;
+  return false;
+#endif
 }
 
 void sendTelnetOption(uint8_t action, uint8_t option) {
-#if ENABLE_RFC2217_BRIDGE
   const uint8_t command[] = {kTelnetIac, action, option};
-  rfcClient.write(command, sizeof(command));
-#else
-  (void)action;
-  (void)option;
-#endif
+  enqueueControlBytes(command, sizeof(command));
 }
 
 void sendSuboption(uint8_t serverOption, const uint8_t *value, size_t valueLength) {
-#if ENABLE_RFC2217_BRIDGE
-  const uint8_t prefix[] = {kTelnetIac, kTelnetSb, kTelnetOptionComPort, serverOption};
-  const uint8_t suffix[] = {kTelnetIac, kTelnetSe};
-  rfcClient.write(prefix, sizeof(prefix));
+  uint8_t frame[48] = {};
+  size_t frameLength = 0;
+  frame[frameLength++] = kTelnetIac;
+  frame[frameLength++] = kTelnetSb;
+  frame[frameLength++] = kTelnetOptionComPort;
+  frame[frameLength++] = serverOption;
   for (size_t i = 0; i < valueLength; ++i) {
-    rfcClient.write(value[i]);
+    if (frameLength + 2 > sizeof(frame)) {
+      protocolTxOverflow = true;
+      return;
+    }
+    frame[frameLength++] = value[i];
     if (value[i] == kTelnetIac) {
-      rfcClient.write(value[i]);
+      frame[frameLength++] = value[i];
     }
   }
-  rfcClient.write(suffix, sizeof(suffix));
-#else
-  (void)serverOption;
-  (void)value;
-  (void)valueLength;
-#endif
+  frame[frameLength++] = kTelnetIac;
+  frame[frameLength++] = kTelnetSe;
+  enqueueControlBytes(frame, frameLength);
 }
 
 void sendSuboptionByte(uint8_t serverOption, uint8_t value) {
@@ -187,14 +257,34 @@ void sendSuboptionU32(uint8_t serverOption, uint32_t value) {
   sendSuboption(serverOption, bytes, sizeof(bytes));
 }
 
+void requestLocalOption(uint8_t option) {
+  const uint8_t bit = telnetOptionBit(option);
+  if (bit == 0 || (localOptionEnabled & bit) != 0 ||
+      (localOptionRequested & bit) != 0) {
+    return;
+  }
+  localOptionRequested |= bit;
+  sendTelnetOption(kTelnetWill, option);
+}
+
+void requestRemoteOption(uint8_t option) {
+  const uint8_t bit = telnetOptionBit(option);
+  if (bit == 0 || (remoteOptionEnabled & bit) != 0 ||
+      (remoteOptionRequested & bit) != 0) {
+    return;
+  }
+  remoteOptionRequested |= bit;
+  sendTelnetOption(kTelnetDo, option);
+}
+
 void sendInitialNegotiation() {
-  sendTelnetOption(kTelnetWill, kTelnetOptionEcho);
-  sendTelnetOption(kTelnetWill, kTelnetOptionSuppressGoAhead);
-  sendTelnetOption(kTelnetDo, kTelnetOptionSuppressGoAhead);
-  sendTelnetOption(kTelnetWill, kTelnetOptionBinary);
-  sendTelnetOption(kTelnetDo, kTelnetOptionBinary);
-  sendTelnetOption(kTelnetWill, kTelnetOptionComPort);
-  sendTelnetOption(kTelnetDo, kTelnetOptionComPort);
+  requestLocalOption(kTelnetOptionEcho);
+  requestLocalOption(kTelnetOptionSuppressGoAhead);
+  requestRemoteOption(kTelnetOptionSuppressGoAhead);
+  requestLocalOption(kTelnetOptionBinary);
+  requestRemoteOption(kTelnetOptionBinary);
+  requestLocalOption(kTelnetOptionComPort);
+  requestRemoteOption(kTelnetOptionComPort);
   sendSuboptionByte(kServerNotifyLineState, 0);
   sendSuboptionByte(kServerNotifyModemState, 0);
 }
@@ -248,12 +338,6 @@ uint8_t currentStopSizeCode() {
   return uart_port::settings().stopBits == 2 ? 2 : 1;
 }
 
-void applyUartSettings(const UartSettings &settings) {
-  if (uart_port::applySettings(settings)) {
-    clearSessionBuffers();
-  }
-}
-
 void drainUartInput(HardwareSerial &uartPort) {
   uint8_t buffer[kIoChunkSize];
   size_t bytesToDiscard = static_cast<size_t>(uartPort.available());
@@ -267,26 +351,207 @@ void drainUartInput(HardwareSerial &uartPort) {
   }
 }
 
+bool captureUartInput(HardwareSerial &uartPort) {
+#if ENABLE_RFC2217_BRIDGE
+  uint8_t buffer[kIoChunkSize];
+  while (uartPort.available() > 0 && uartToTcpBuffer.freeSpace() > 0) {
+    const size_t requestSize = min(
+        static_cast<size_t>(uartPort.available()),
+        min(sizeof(buffer), uartToTcpBuffer.freeSpace()));
+    const size_t readSize = uartPort.read(buffer, requestSize);
+    if (readSize == 0) {
+      break;
+    }
+    uartToTcpBuffer.push(buffer, readSize);
+  }
+#else
+  (void)uartPort;
+#endif
+  return uartPort.available() == 0;
+}
+
+void queueFlushAck(uint8_t phase, uint8_t status, uint32_t token) {
+#if ENABLE_RFC2217_BRIDGE
+  const uint8_t ack[] = {
+      'W', 'U', 'A', '1',
+      phase,
+      status,
+      static_cast<uint8_t>(token >> 24),
+      static_cast<uint8_t>(token >> 16),
+      static_cast<uint8_t>(token >> 8),
+      static_cast<uint8_t>(token),
+  };
+  memcpy(flushAck, ack, sizeof(ack));
+  flushAckLength = sizeof(ack);
+  flushAckOffset = 0;
+#else
+  (void)phase;
+  (void)status;
+  (void)token;
+#endif
+}
+
+void flushControlAckIfNeeded() {
+#if ENABLE_RFC2217_BRIDGE
+  if (!flushControlClientActive || flushAckOffset >= flushAckLength) {
+    return;
+  }
+  const int written = ::send(
+      flushControlClient.fd(),
+      flushAck + flushAckOffset,
+      flushAckLength - flushAckOffset,
+      MSG_DONTWAIT);
+  if (written > 0) {
+    flushAckOffset += static_cast<size_t>(written);
+    if (flushAckOffset == flushAckLength) {
+      flushAckLength = 0;
+      flushAckOffset = 0;
+    }
+  } else if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+    flushControlClient.stop();
+    flushControlClientActive = false;
+    if (dropTcpDataUntilResume) {
+      rfcClient.stop();
+    }
+  }
+#endif
+}
+
+void handleFlushControl(HardwareSerial &uartPort) {
+#if ENABLE_RFC2217_BRIDGE
+  if (flushControlClientActive && !flushControlClient.connected()) {
+    flushControlClient.stop();
+    flushControlClientActive = false;
+    if (dropTcpDataUntilResume) {
+      rfcClient.stop();
+      return;
+    }
+  }
+  if (!flushControlClientActive) {
+    WiFiClient candidate = flushControlServer.accept();
+    if (candidate) {
+      if (!rfcClientActive || candidate.remoteIP() != rfcClient.remoteIP()) {
+        candidate.stop();
+      } else {
+        candidate.setNoDelay(true);
+        flushControlClient = candidate;
+        flushControlClientActive = true;
+        flushRequestLength = 0;
+      }
+    }
+  }
+  flushControlAckIfNeeded();
+  if (!flushControlClientActive || flushAckLength != 0) {
+    return;
+  }
+  while (flushControlClient.available() > 0 && flushRequestLength < sizeof(flushRequest)) {
+    const int value = flushControlClient.read();
+    if (value < 0) {
+      break;
+    }
+    flushRequest[flushRequestLength++] = static_cast<uint8_t>(value);
+  }
+  if (flushRequestLength != sizeof(flushRequest)) {
+    return;
+  }
+  const bool validMagic = flushRequest[0] == 'W' && flushRequest[1] == 'U' &&
+      flushRequest[2] == 'F' && flushRequest[3] == '1';
+  const uint8_t command = flushRequest[4];
+  const uint32_t token = (static_cast<uint32_t>(flushRequest[5]) << 24) |
+      (static_cast<uint32_t>(flushRequest[6]) << 16) |
+      (static_cast<uint32_t>(flushRequest[7]) << 8) |
+      static_cast<uint32_t>(flushRequest[8]);
+  flushRequestLength = 0;
+  if (!validMagic || (command != 1 && command != 2) || dropTcpDataUntilResume) {
+    queueFlushAck(1, 1, token);
+    return;
+  }
+
+  clearTcpToUartBuffer();
+  const bool preserveInput = command == 1;
+  if (!preserveInput) {
+    clearUartToTcpBuffer();
+    drainUartInput(uartPort);
+  }
+  if (!uart_port::discardOutput(preserveInput ? captureUartInput : nullptr)) {
+    queueFlushAck(1, 1, token);
+    return;
+  }
+  dropTcpDataUntilResume = true;
+  flushToken = token;
+  queueFlushAck(1, 0, token);
+#else
+  (void)uartPort;
+#endif
+}
+
+bool applyUartSettings(const UartSettings &settings) {
+  const UartSettings &current = uart_port::settings();
+  if (settings.baudRate == current.baudRate &&
+      settings.dataBits == current.dataBits &&
+      settings.parity == current.parity &&
+      settings.stopBits == current.stopBits) {
+    if (!uart_port::waitForTxDrain() || !captureUartInput(uart_port::serial())) {
+      return false;
+    }
+    return true;
+  }
+  return uart_port::applySettings(settings, captureUartInput);
+}
+
 void handleTelnetNegotiation(uint8_t command, uint8_t option) {
+  const uint8_t bit = telnetOptionBit(option);
   switch (command) {
-    case kTelnetDo:
-      sendTelnetOption(isSupportedLocalOption(option) ? kTelnetWill : kTelnetWont, option);
+    case kTelnetDo: {
+      if (!isSupportedLocalOption(option) || bit == 0) {
+        sendTelnetOption(kTelnetWont, option);
+        break;
+      }
+      const bool wasRequested = (localOptionRequested & bit) != 0;
+      localOptionRequested &= static_cast<uint8_t>(~bit);
+      if ((localOptionEnabled & bit) == 0) {
+        localOptionEnabled |= bit;
+        if (!wasRequested) {
+          sendTelnetOption(kTelnetWill, option);
+        }
+      }
       break;
+    }
     case kTelnetDont:
-      sendTelnetOption(kTelnetWont, option);
+      if (bit != 0 && ((localOptionEnabled | localOptionRequested) & bit) != 0) {
+        localOptionEnabled &= static_cast<uint8_t>(~bit);
+        localOptionRequested &= static_cast<uint8_t>(~bit);
+        sendTelnetOption(kTelnetWont, option);
+      }
       break;
-    case kTelnetWill:
-      sendTelnetOption(isSupportedRemoteOption(option) ? kTelnetDo : kTelnetDont, option);
+    case kTelnetWill: {
+      if (!isSupportedRemoteOption(option) || bit == 0) {
+        sendTelnetOption(kTelnetDont, option);
+        break;
+      }
+      const bool wasRequested = (remoteOptionRequested & bit) != 0;
+      remoteOptionRequested &= static_cast<uint8_t>(~bit);
+      if ((remoteOptionEnabled & bit) == 0) {
+        remoteOptionEnabled |= bit;
+        if (!wasRequested) {
+          sendTelnetOption(kTelnetDo, option);
+        }
+      }
       break;
+    }
     case kTelnetWont:
-      sendTelnetOption(kTelnetDont, option);
+      if (bit != 0 && ((remoteOptionEnabled | remoteOptionRequested) & bit) != 0) {
+        remoteOptionEnabled &= static_cast<uint8_t>(~bit);
+        remoteOptionRequested &= static_cast<uint8_t>(~bit);
+        sendTelnetOption(kTelnetDont, option);
+      }
       break;
     default:
       break;
   }
 }
 
-void handleSetControl(uint8_t value) {
+void handleSetControl(uint8_t value, HardwareSerial &uartPort) {
   switch (value) {
     case kControlRequestFlowSetting:
     case kControlUseNoFlow:
@@ -298,8 +563,8 @@ void handleSetControl(uint8_t value) {
       sendSuboptionByte(kServerSetControl, breakActive ? kControlBreakOn : kControlBreakOff);
       break;
     case kControlBreakOn:
-      breakActive = true;
-      sendSuboptionByte(kServerSetControl, kControlBreakOn);
+      breakActive = false;
+      sendSuboptionByte(kServerSetControl, kControlBreakOff);
       break;
     case kControlBreakOff:
       breakActive = false;
@@ -309,23 +574,39 @@ void handleSetControl(uint8_t value) {
       sendSuboptionByte(kServerSetControl, dtrActive ? kControlDtrOn : kControlDtrOff);
       break;
     case kControlDtrOn:
-      setDtr(true);
-      sendSuboptionByte(kServerSetControl, kControlDtrOn);
+      if (uart_port::waitForTxDrain()) {
+        if (captureUartInput(uartPort)) {
+          setDtr(true);
+        }
+      }
+      sendSuboptionByte(kServerSetControl, dtrActive ? kControlDtrOn : kControlDtrOff);
       break;
     case kControlDtrOff:
-      setDtr(false);
-      sendSuboptionByte(kServerSetControl, kControlDtrOff);
+      if (uart_port::waitForTxDrain()) {
+        if (captureUartInput(uartPort)) {
+          setDtr(false);
+        }
+      }
+      sendSuboptionByte(kServerSetControl, dtrActive ? kControlDtrOn : kControlDtrOff);
       break;
     case kControlRequestRts:
       sendSuboptionByte(kServerSetControl, rtsActive ? kControlRtsOn : kControlRtsOff);
       break;
     case kControlRtsOn:
-      setRts(true);
-      sendSuboptionByte(kServerSetControl, kControlRtsOn);
+      if (uart_port::waitForTxDrain()) {
+        if (captureUartInput(uartPort)) {
+          setRts(true);
+        }
+      }
+      sendSuboptionByte(kServerSetControl, rtsActive ? kControlRtsOn : kControlRtsOff);
       break;
     case kControlRtsOff:
-      setRts(false);
-      sendSuboptionByte(kServerSetControl, kControlRtsOff);
+      if (uart_port::waitForTxDrain()) {
+        if (captureUartInput(uartPort)) {
+          setRts(false);
+        }
+      }
+      sendSuboptionByte(kServerSetControl, rtsActive ? kControlRtsOn : kControlRtsOff);
       break;
     default:
       break;
@@ -348,7 +629,10 @@ void handleSuboption(HardwareSerial &uartPort) {
         if (baudRate > 0) {
           UartSettings next = uart_port::settings();
           next.baudRate = baudRate;
-          applyUartSettings(next);
+          if (!applyUartSettings(next)) {
+            sendSuboptionU32(kServerSetBaudRate, 0);
+            break;
+          }
         }
       }
       sendSuboptionU32(kServerSetBaudRate, uart_port::settings().baudRate);
@@ -357,7 +641,10 @@ void handleSuboption(HardwareSerial &uartPort) {
       if (suboptionLength >= 3 && suboption[2] >= 5 && suboption[2] <= 8) {
         UartSettings next = uart_port::settings();
         next.dataBits = suboption[2];
-        applyUartSettings(next);
+        if (!applyUartSettings(next)) {
+          sendSuboptionByte(kServerSetDataSize, 0);
+          break;
+        }
       }
       sendSuboptionByte(kServerSetDataSize, uart_port::settings().dataBits);
       break;
@@ -366,13 +653,22 @@ void handleSuboption(HardwareSerial &uartPort) {
         UartSettings next = uart_port::settings();
         if (suboption[2] == 1) {
           next.parity = 'N';
-          applyUartSettings(next);
+          if (!applyUartSettings(next)) {
+            sendSuboptionByte(kServerSetParity, 0);
+            break;
+          }
         } else if (suboption[2] == 2) {
           next.parity = 'O';
-          applyUartSettings(next);
+          if (!applyUartSettings(next)) {
+            sendSuboptionByte(kServerSetParity, 0);
+            break;
+          }
         } else if (suboption[2] == 3) {
           next.parity = 'E';
-          applyUartSettings(next);
+          if (!applyUartSettings(next)) {
+            sendSuboptionByte(kServerSetParity, 0);
+            break;
+          }
         }
       }
       sendSuboptionByte(kServerSetParity, currentParityCode());
@@ -381,13 +677,16 @@ void handleSuboption(HardwareSerial &uartPort) {
       if (suboptionLength >= 3 && (suboption[2] == 1 || suboption[2] == 2)) {
         UartSettings next = uart_port::settings();
         next.stopBits = suboption[2] == 2 ? 2 : 1;
-        applyUartSettings(next);
+        if (!applyUartSettings(next)) {
+          sendSuboptionByte(kServerSetStopSize, 0);
+          break;
+        }
       }
       sendSuboptionByte(kServerSetStopSize, currentStopSizeCode());
       break;
     case kSetControl:
       if (suboptionLength >= 3) {
-        handleSetControl(suboption[2]);
+        handleSetControl(suboption[2], uartPort);
       }
       break;
     case kNotifyLineState:
@@ -417,9 +716,27 @@ void handleSuboption(HardwareSerial &uartPort) {
         }
         if (suboption[2] == kPurgeTransmitBuffer || suboption[2] == kPurgeBothBuffers) {
           clearTcpToUartBuffer();
+          const bool preserveInput = suboption[2] == kPurgeTransmitBuffer;
+          if (!uart_port::discardOutput(preserveInput ? captureUartInput : nullptr)) {
+            sendSuboptionByte(kServerPurgeData, 0);
+            break;
+          }
         }
 #endif
         sendSuboptionByte(kServerPurgeData, suboption[2]);
+      }
+      break;
+    case kResumeAfterFlush:
+      if (suboptionLength >= 6) {
+        const uint32_t token = (static_cast<uint32_t>(suboption[2]) << 24) |
+            (static_cast<uint32_t>(suboption[3]) << 16) |
+            (static_cast<uint32_t>(suboption[4]) << 8) |
+            static_cast<uint32_t>(suboption[5]);
+        if (dropTcpDataUntilResume && token == flushToken) {
+          dropTcpDataUntilResume = false;
+          flushToken = 0;
+          queueFlushAck(2, 0, token);
+        }
       }
       break;
     default:
@@ -436,18 +753,18 @@ bool enqueueTcpDataByte(uint8_t value) {
 #endif
 }
 
-bool processIncomingByte(uint8_t value, HardwareSerial &uartPort) {
+bool processIncomingByte(uint8_t value) {
   switch (telnetState) {
     case TelnetState::Normal:
       if (value == kTelnetIac) {
         telnetState = TelnetState::IacSeen;
-      } else if (!enqueueTcpDataByte(value)) {
+      } else if (!dropTcpDataUntilResume && !enqueueTcpDataByte(value)) {
         return false;
       }
       break;
     case TelnetState::IacSeen:
       if (value == kTelnetIac) {
-        if (!enqueueTcpDataByte(kTelnetIac)) {
+        if (!dropTcpDataUntilResume && !enqueueTcpDataByte(kTelnetIac)) {
           return false;
         }
         telnetState = TelnetState::Normal;
@@ -479,8 +796,9 @@ bool processIncomingByte(uint8_t value, HardwareSerial &uartPort) {
         }
         telnetState = TelnetState::Subnegotiation;
       } else if (value == kTelnetSe) {
-        handleSuboption(uartPort);
         telnetState = TelnetState::Normal;
+        suboptionReady = true;
+        return false;
       } else {
         telnetState = TelnetState::Normal;
       }
@@ -489,8 +807,11 @@ bool processIncomingByte(uint8_t value, HardwareSerial &uartPort) {
   return true;
 }
 
-void pullTcpIntoBuffer(HardwareSerial &uartPort) {
+void pullTcpIntoBuffer() {
 #if ENABLE_RFC2217_BRIDGE
+  if (suboptionReady) {
+    return;
+  }
   while (rfcClient.available() > 0) {
     if ((telnetState == TelnetState::Normal || telnetState == TelnetState::IacSeen) &&
         tcpToUartBuffer.freeSpace() == 0) {
@@ -501,13 +822,12 @@ void pullTcpIntoBuffer(HardwareSerial &uartPort) {
     if (byteValue < 0) {
       break;
     }
-    if (!processIncomingByte(static_cast<uint8_t>(byteValue), uartPort)) {
+    if (!processIncomingByte(static_cast<uint8_t>(byteValue))) {
       break;
     }
     bridge::markActivity();
   }
 #else
-  (void)uartPort;
 #endif
 }
 
@@ -537,16 +857,9 @@ void flushTcpBufferToUart(HardwareSerial &uartPort) {
 
 void pullUartIntoBuffer(HardwareSerial &uartPort) {
 #if ENABLE_RFC2217_BRIDGE
-  uint8_t buffer[kIoChunkSize];
-  while (uartPort.available() > 0 && uartToTcpBuffer.freeSpace() > 0) {
-    const size_t requestSize = min(
-        static_cast<size_t>(uartPort.available()),
-        min(sizeof(buffer), uartToTcpBuffer.freeSpace()));
-    const size_t readSize = uartPort.read(buffer, requestSize);
-    if (readSize == 0) {
-      break;
-    }
-    uartToTcpBuffer.push(buffer, readSize);
+  const size_t previousSize = uartToTcpBuffer.size();
+  captureUartInput(uartPort);
+  if (uartToTcpBuffer.size() > previousSize) {
     bridge::markActivity();
   }
 #else
@@ -554,25 +867,103 @@ void pullUartIntoBuffer(HardwareSerial &uartPort) {
 #endif
 }
 
-bool writeClientByte(uint8_t value) {
+ssize_t sendClientNonBlocking(const uint8_t *data, size_t size) {
 #if ENABLE_RFC2217_BRIDGE
-  return rfcClient.write(value) == 1;
+  const int socketFd = rfcClient.fd();
+  if (socketFd < 0) {
+    errno = EBADF;
+    return -1;
+  }
+  return send(socketFd, data, size, MSG_DONTWAIT | MSG_NOSIGNAL);
 #else
-  (void)value;
-  return false;
+  (void)data;
+  (void)size;
+  errno = ENOTCONN;
+  return -1;
 #endif
 }
 
-void flushUartBufferToTcp() {
+bool socketWriteWouldBlock() {
+  return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
+}
+
+void prepareEncodedUartChunk() {
 #if ENABLE_RFC2217_BRIDGE
-  while (rfcClient.connected()) {
-    if (pendingEscapedIacByte) {
-      if (!writeClientByte(kTelnetIac)) {
+  if (encodedUartLength != 0 || uartToTcpBuffer.size() == 0) {
+    return;
+  }
+
+  uint8_t raw[kIoChunkSize];
+  encodedUartRawBytes = min(uartToTcpBuffer.size(), sizeof(raw));
+  uartToTcpBuffer.peek(raw, encodedUartRawBytes);
+  encodedUartLength = 0;
+  encodedUartOffset = 0;
+  for (size_t i = 0; i < encodedUartRawBytes; ++i) {
+    encodedUartChunk[encodedUartLength++] = raw[i];
+    if (raw[i] == kTelnetIac) {
+      encodedUartChunk[encodedUartLength++] = raw[i];
+    }
+  }
+#endif
+}
+
+void flushOutboundToTcp() {
+#if ENABLE_RFC2217_BRIDGE
+  size_t sendBudget = kTcpSendBudgetPerLoop;
+  uint8_t controlChunk[kIoChunkSize];
+
+  while (isClientConnected() && sendBudget > 0) {
+    // Never interleave a control frame into a partially sent escaped UART chunk.
+    if (encodedUartOffset < encodedUartLength) {
+      const size_t requestSize = min(
+          encodedUartLength - encodedUartOffset,
+          sendBudget);
+      const ssize_t written = sendClientNonBlocking(
+          encodedUartChunk + encodedUartOffset,
+          requestSize);
+      if (written < 0) {
+        if (socketWriteWouldBlock()) {
+          return;
+        }
+        disconnectClient("socket send failed");
         return;
       }
-      pendingEscapedIacByte = false;
-      uartToTcpBuffer.discard(1);
-      bridge::markActivity();
+      if (written == 0) {
+        disconnectClient("socket closed during write");
+        return;
+      }
+
+      encodedUartOffset += static_cast<size_t>(written);
+      sendBudget -= static_cast<size_t>(written);
+      if (encodedUartOffset == encodedUartLength) {
+        uartToTcpBuffer.discard(encodedUartRawBytes);
+        encodedUartLength = 0;
+        encodedUartOffset = 0;
+        encodedUartRawBytes = 0;
+        bridge::markActivity();
+      }
+      continue;
+    }
+
+    if (controlToTcpBuffer.size() > 0) {
+      const size_t chunkSize = min(
+          controlToTcpBuffer.size(),
+          min(sizeof(controlChunk), sendBudget));
+      controlToTcpBuffer.peek(controlChunk, chunkSize);
+      const ssize_t written = sendClientNonBlocking(controlChunk, chunkSize);
+      if (written < 0) {
+        if (socketWriteWouldBlock()) {
+          return;
+        }
+        disconnectClient("socket send failed");
+        return;
+      }
+      if (written == 0) {
+        disconnectClient("socket closed during write");
+        return;
+      }
+      controlToTcpBuffer.discard(static_cast<size_t>(written));
+      sendBudget -= static_cast<size_t>(written);
       continue;
     }
 
@@ -580,19 +971,7 @@ void flushUartBufferToTcp() {
       return;
     }
 
-    uint8_t value = 0;
-    uartToTcpBuffer.peek(&value, 1);
-    if (!writeClientByte(value)) {
-      return;
-    }
-
-    if (value == kTelnetIac) {
-      pendingEscapedIacByte = true;
-      continue;
-    }
-
-    uartToTcpBuffer.discard(1);
-    bridge::markActivity();
+    prepareEncodedUartChunk();
   }
 #endif
 }
@@ -603,9 +982,11 @@ bool beginBuffers() {
 #if ENABLE_RFC2217_BRIDGE
   const bool tcpReady = tcpToUartBuffer.begin(tcpToUartStorage, sizeof(tcpToUartStorage));
   const bool uartReady = uartToTcpBuffer.begin(uartToTcpStorage, sizeof(uartToTcpStorage));
-  if (!tcpReady || !uartReady) {
+  const bool controlReady = controlToTcpBuffer.begin(controlToTcpStorage, sizeof(controlToTcpStorage));
+  if (!tcpReady || !uartReady || !controlReady) {
     tcpToUartBuffer.release();
     uartToTcpBuffer.release();
+    controlToTcpBuffer.release();
     return false;
   }
   initializeControlPin(UART_BRIDGE_DTR_PIN);
@@ -621,6 +1002,8 @@ bool startServer() {
   }
   rfcServer.begin();
   rfcServer.setNoDelay(true);
+  flushControlServer.begin();
+  flushControlServer.setNoDelay(true);
   rfcServerStarted = true;
   return true;
 #else
@@ -635,6 +1018,7 @@ void stopServer() {
   disconnectClient("server stopping");
 #if ENABLE_RFC2217_BRIDGE
   rfcServer.end();
+  flushControlServer.end();
 #endif
   rfcServerStarted = false;
 }
@@ -643,7 +1027,9 @@ void disconnectClient(const char *reason) {
 #if ENABLE_RFC2217_BRIDGE
   const bool hadClient = rfcClientActive;
   rfcClient.stop();
+  flushControlClient.stop();
   rfcClientActive = false;
+  flushControlClientActive = false;
   clearSessionBuffers();
   resetProtocolState();
   setDtr(false);
@@ -656,7 +1042,7 @@ void disconnectClient(const char *reason) {
 #endif
 }
 
-void acceptClientIfNeeded(HardwareSerial &uartPort) {
+void acceptClientIfNeeded(HardwareSerial &uartPort, bool allowNewClient) {
 #if ENABLE_RFC2217_BRIDGE
   if (!rfcServerStarted) {
     return;
@@ -674,9 +1060,15 @@ void acceptClientIfNeeded(HardwareSerial &uartPort) {
   if (!newClient) {
     return;
   }
+  if (!allowNewClient) {
+    newClient.stop();
+    return;
+  }
 
   if (bridge::isTcpClientConnected()) {
-    bridge::disconnectTcpClient("rfc2217 session active");
+    newClient.stop();
+    debugPrintln("RFC2217 client rejected while raw TCP session owns UART");
+    return;
   }
 
   drainUartInput(uartPort);
@@ -703,10 +1095,26 @@ void handleClient(HardwareSerial &uartPort) {
     return;
   }
 
-  pullTcpIntoBuffer(uartPort);
+  handleFlushControl(uartPort);
+  if (!rfcClient.connected()) {
+    disconnectClient("flush control lost");
+    return;
+  }
+
+  pullTcpIntoBuffer();
   flushTcpBufferToUart(uartPort);
+  if (suboptionReady && tcpToUartBuffer.size() == 0) {
+    handleSuboption(uartPort);
+    suboptionReady = false;
+    suboptionLength = 0;
+  }
   pullUartIntoBuffer(uartPort);
-  flushUartBufferToTcp();
+  flushOutboundToTcp();
+
+  if (protocolTxOverflow) {
+    disconnectClient("protocol response queue overflow");
+    return;
+  }
 
   if (!rfcClient.connected()) {
     disconnectClient("peer closed");

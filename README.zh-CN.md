@@ -111,6 +111,7 @@ esptool.py --chip esp32c3 --port rfc2217://<ESP32_IP>:2217?ign_set_control --bau
 ```bash
 cd tools
 make
+make test
 ```
 
 以 root 运行，并选择一个未被占用的 `ttyUSBx` 名称：
@@ -125,7 +126,7 @@ sudo ./wifiuart-tty --host <ESP32_IP> --name ttyUSB10 -f
 esptool.py --chip esp32c3 --port /dev/ttyUSB10 --baud 460800 write_flash 0x0 firmware.bin
 ```
 
-该工具会连接固件 `2217` 端口的 RFC2217 服务，在本地实现 pyserial/esptool 使用的 Linux 串口 ioctl，并默认创建 `/dev/ttyUSB10`。它会抑制 pyserial 打开串口时自动拉起 DTR/RTS 的动作，随后转发 esptool 的复位序列，让目标 ESP 通过已配置的 DTR/RTS GPIO 进入下载模式。
+该工具会连接固件 `2217` 端口的 RFC2217 服务和 `2218` 端口的 flush 控制服务，在本地实现 pyserial/esptool 使用的 Linux 串口 ioctl，并默认创建 `/dev/ttyUSB10`。它只抑制打开串口时 DTR/RTS 的首轮初始化更新，随后转发 esptool 的复位序列并等待匹配的 RFC2217 控制 ACK。独立 flush 控制通道会立即清空 UART TX 驱动，再通过 RFC2217 数据流中的带 token 标记丢弃 TCP 队列内的旧字节，不影响 RX 数据和 DTR/RTS。由于固件尚未实际驱动 UART BREAK，相关 ioctl 会明确返回不支持。
 
 如果系统没有 `/dev/cuse`，先加载内核模块：
 
@@ -139,6 +140,7 @@ sudo modprobe cuse
 - 最多支持 24 组 Wi-Fi 配置
 - 桥接缓冲区为 TCP->UART `12KB`、UART->TCP `20KB`；UART 驱动内部缓冲为 RX `8KB`、TX `4KB`
 - RFC2217 使用单独的 TCP->UART `4KB` 和 UART->TCP `4KB` 缓冲区，烧录/控制会话不会和原始 TCP 桥接共用缓冲
+- 原始 TCP 与 RFC2217 采用先连接者持有 UART 的策略；原始 TCP 活跃时会拒绝新的 RFC2217 连接
 - `platformio.ini` 有意按 S3/C3/C6 分成独立环境段，而不是依赖隐式的分支配置
 - UART RX FIFO 阈值可通过 `UART_FIFO_THRESHOLD` 调整；当前 C3 使用 MID=`32`，S3/C6 使用 HIGH=`96`
 
@@ -146,7 +148,7 @@ sudo modprobe cuse
 
 - `POST /api/wifi/scan` 会启动一次非阻塞 Wi-Fi 扫描，扫描进行中返回 `{ "scanning": true, "networks": [] }`
 - `GET /api/wifi/scan` 返回当前扫描状态和最近一次扫描结果列表
-- `POST /api/wifi/save` 在已有槽位上遇到空 `password` 且未传 `keepPassword` 或 `keepPassword=1` 时会保留旧密码；开放网络或需要清空密码时传 `keepPassword=0`
+- `POST /api/wifi/save` 仅在槽位已保存相同 SSID，且 `password` 为空并省略 `keepPassword` 或传 `keepPassword=1` 时保留旧密码；开放网络或需要清空密码时传 `keepPassword=0`
 - 在 `platformio.ini` 中定义 `ENABLE_HTTP_AUTH=1` 并设置 `HTTP_AUTH_PASSWORD` 后，Web 界面和 JSON API 会启用 HTTP Basic Auth 保护
 
 ## UART FIFO 档位

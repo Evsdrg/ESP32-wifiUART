@@ -111,6 +111,7 @@ For tools that expect a local `/dev/ttyUSBx` device, build the CUSE helper:
 ```bash
 cd tools
 make
+make test
 ```
 
 Run it as root, choosing an unused `ttyUSBx` name:
@@ -125,7 +126,7 @@ Then use the normal esptool serial path:
 esptool.py --chip esp32c3 --port /dev/ttyUSB10 --baud 460800 write_flash 0x0 firmware.bin
 ```
 
-The helper connects to the firmware RFC2217 service on port `2217`, implements the Linux serial ioctls used by pyserial/esptool, and presents the device as `/dev/ttyUSB10` by default. It intentionally suppresses pyserial's open-time DTR/RTS assertions, then forwards esptool's reset sequence so the target ESP can enter download mode through the configured DTR/RTS GPIOs.
+The helper connects to the firmware RFC2217 service on port `2217` and its flush-control service on port `2218`, implements the Linux serial ioctls used by pyserial/esptool, and presents the device as `/dev/ttyUSB10` by default. It intentionally suppresses the first open-time DTR/RTS updates, then forwards esptool's reset sequence and waits for matching RFC2217 control acknowledgements. The separate flush-control channel clears the UART TX driver immediately while a tokenized marker on the RFC2217 stream discards older TCP-queued bytes without disturbing RX data or DTR/RTS. Serial BREAK ioctls are reported as unsupported because the firmware does not drive a hardware BREAK signal.
 
 If `/dev/cuse` is missing, load the kernel module first:
 
@@ -139,6 +140,7 @@ sudo modprobe cuse
 - Up to 24 Wi-Fi profiles are supported
 - Bridge buffers are `12KB` for TCP->UART and `20KB` for UART->TCP; UART driver buffers are `8KB` RX and `4KB` TX
 - RFC2217 uses separate `4KB` TCP->UART and `4KB` UART->TCP buffers so flashing/control sessions do not share raw TCP bridge buffers
+- Raw TCP and RFC2217 use first-connection ownership; a new RFC2217 connection is rejected while raw TCP owns the UART
 - `platformio.ini` is intentionally split into separate S3/C3/C6 environment sections instead of relying on implicit branch-only settings
 - UART RX FIFO threshold is configurable with `UART_FIFO_THRESHOLD`; current presets are MID=`32` for C3 and HIGH=`96` for S3/C6
 
@@ -146,7 +148,7 @@ sudo modprobe cuse
 
 - `POST /api/wifi/scan` starts a non-blocking Wi-Fi scan and returns `{ "scanning": true, "networks": [] }` while the scan is running
 - `GET /api/wifi/scan` returns the current scan state and the most recent scan result list
-- `POST /api/wifi/save` keeps the previous password for an existing slot when `password` is empty and `keepPassword` is omitted or set to `1`; pass `keepPassword=0` to save an empty password for open networks
+- `POST /api/wifi/save` keeps the previous password only when the slot already contains the same SSID and `password` is empty with `keepPassword` omitted or set to `1`; pass `keepPassword=0` to save an empty password for open networks
 - Define `ENABLE_HTTP_AUTH=1` and set `HTTP_AUTH_PASSWORD` in `platformio.ini` to protect the web UI and JSON APIs with HTTP Basic Auth
 
 ## UART FIFO Tiers

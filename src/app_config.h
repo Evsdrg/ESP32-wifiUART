@@ -91,6 +91,10 @@ static_assert(!ENABLE_HTTP_AUTH || sizeof(HTTP_AUTH_PASSWORD) > 1,
 #define RFC2217_BRIDGE_PORT 2217
 #endif
 
+#ifndef RFC2217_FLUSH_CONTROL_PORT
+#define RFC2217_FLUSH_CONTROL_PORT 2218
+#endif
+
 #ifndef UART_BRIDGE_DTR_PIN
 #define UART_BRIDGE_DTR_PIN -1
 #endif
@@ -119,10 +123,12 @@ constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 constexpr uint32_t kWifiReconnectIntervalMs = 3000;
 constexpr uint32_t kWifiFallbackRetryIntervalMs = 30000;
 constexpr uint32_t kWifiScanTimeoutMs = 12000;
+constexpr uint32_t kWifiReconfigureGraceMs = 250;
 #if CONFIGURE_WIFI_TX_POWER
 constexpr wifi_power_t kWifiTxPower = WIFI_TX_POWER;
 #endif
 constexpr uint32_t kUartBackpressureLogIntervalMs = 2000;
+constexpr uint32_t kUartTxDrainTimeoutMs = 100;
 constexpr uint32_t kStatsLogIntervalMs = 10000;
 constexpr uint32_t kDisconnectedBlinkPeriodMs = 140;
 constexpr uint32_t kWifiBlinkPeriodMs = 700;
@@ -147,10 +153,12 @@ constexpr uint32_t kActivityPulseGapMs = 55;
 static_assert(UART_FIFO_THRESHOLD >= 1 && UART_FIFO_THRESHOLD <= 127,
               "UART_FIFO_THRESHOLD must be 1-127 bytes");
 constexpr size_t kIoChunkSize = 256;
+constexpr size_t kTcpSendBudgetPerLoop = 1024;
 constexpr size_t kPendingTcpToUartBytes = 12288;
 constexpr size_t kPendingUartToTcpBytes = 20480;
 constexpr size_t kRfc2217PendingTcpToUartBytes = 4096;
 constexpr size_t kRfc2217PendingUartToTcpBytes = 4096;
+constexpr size_t kRfc2217ControlToTcpBytes = 512;
 constexpr size_t kUartDriverRxBufferSize = 8192;
 constexpr size_t kUartDriverTxBufferSize = 4096;
 constexpr uint8_t kMaxWiFiProfiles = 24;
