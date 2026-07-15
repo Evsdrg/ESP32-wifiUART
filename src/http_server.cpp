@@ -138,6 +138,40 @@ void addUartSettingsJson(JsonDocument &doc) {
 }
 
 /**
+ * @brief 严格解析无符号十进制字符串
+ *
+ * 与 String::toInt() 不同，本函数拒绝空串、非数字字符（如 "300abc"、
+ * "0x10"）和溢出，只接受纯十进制数字。
+ *
+ * @param value 输入字符串
+ * @param out   输出：解析后的值
+ * @return true 解析成功
+ */
+bool parseUnsignedDecimal(const String &value, uint32_t &out) {
+  if (value.isEmpty()) {
+    return false;
+  }
+
+  uint32_t parsed = 0;
+  for (size_t i = 0; i < value.length(); ++i) {
+    const char ch = value[i];
+    if (ch < '0' || ch > '9') {
+      return false;
+    }
+
+    const uint32_t digit = static_cast<uint32_t>(ch - '0');
+    if (parsed > (UINT32_MAX - digit) / 10U) {
+      return false;  // 溢出保护
+    }
+
+    parsed = (parsed * 10U) + digit;
+  }
+
+  out = parsed;
+  return true;
+}
+
+/**
  * @brief 从 HTTP 请求参数解析 UART 设置
  *
  * 校验范围：baudRate >= 300，dataBits 5-8，parity 单字符，stopBits 1 或 2。
