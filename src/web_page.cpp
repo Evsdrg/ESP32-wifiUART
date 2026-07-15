@@ -131,6 +131,13 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
               <input id="wifiPassword" name="password" type="password" maxlength="64" placeholder="留空可保留当前槽位已有密码，或用于开放网络">
             </div>
             <div>
+              <label for="keepPassword">密码留空时</label>
+              <select id="keepPassword" name="keepPassword">
+                <option value="1">保留该槽位旧密码</option>
+                <option value="0">保存为空密码</option>
+              </select>
+            </div>
+            <div>
               <label for="activateProfile">保存后立即启用</label>
               <select id="activateProfile" name="activate">
                 <option value="0">否</option>
@@ -143,7 +150,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
           </div>
         </form>
         <div class="status" id="wifi-status"></div>
-        <div class="subtle" id="wifi-password-hint">密码留空仅适用于开放网络，或保留当前槽位已保存的密码。</div>
+        <div class="subtle" id="wifi-password-hint">密码留空默认保留旧密码；如果要开放网络或清空密码，请选择保存为空密码。</div>
         <div class="profiles" id="profiles">当前还没有保存任何 Wi-Fi 配置。</div>
 
         <div class="section">
@@ -360,7 +367,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
     function updatePasswordHint(isOpenNetwork) {
       wifiPasswordHintEl.textContent = isOpenNetwork
         ? '已选择开放网络，可以不填写密码。'
-        : '密码留空仅适用于开放网络，或保留当前槽位已保存的密码。';
+        : '密码留空默认保留旧密码；如果要开放网络或清空密码，请选择保存为空密码。';
     }
 
     async function refreshWiFi() {
@@ -446,6 +453,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       wifiForm.ssid.value = ssid;
       if (isOpenNetwork) {
         wifiForm.password.value = '';
+        wifiForm.keepPassword.value = '0';
       }
       wifiForm.activate.value = '1';
       updatePasswordHint(isOpenNetwork);

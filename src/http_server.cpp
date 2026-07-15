@@ -234,9 +234,10 @@ void handleSaveWiFiProfile() {
     return;
   }
 
-  // 密码为空时保留原槽位密码（渐进式修改）
+  // 密码为空时默认兼容旧调用方保留旧密码；显式 keepPassword=0 时才清空。
   String password = server.arg("password");
-  if (password.isEmpty() && wifi_profiles::profileInUse(index)) {
+  const bool keepExistingPassword = !server.hasArg("keepPassword") || server.arg("keepPassword") == "1";
+  if (password.isEmpty() && keepExistingPassword && wifi_profiles::profileInUse(index)) {
     password = wifi_profiles::profile(index).password;
   }
 
