@@ -389,7 +389,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       if (!response.ok) {
         throw new Error(data.error || '请求失败');
       }
-      await refreshWiFi();
+      renderWiFi(data);
       return data;
     }
 

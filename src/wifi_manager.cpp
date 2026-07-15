@@ -50,6 +50,11 @@ uint32_t scanStartedAtMs = 0;
 /** @brief 是否有待处理的 Wi-Fi 重配置请求 */
 bool pendingReconfigure = false;
 
+/** @brief 最近一次 Wi-Fi 重配置请求时间，用于给 HTTP 响应预留发送窗口 */
+uint32_t pendingReconfigureRequestedAtMs = 0;
+
+constexpr uint32_t kReconfigureResponseGraceMs = 250;
+
 /** @brief 最近一次 Wi-Fi 扫描结果缓存 */
 WiFiScanResult scanResults[kMaxWiFiProfiles] = {};
 
@@ -358,6 +363,7 @@ void handleStationMode() {
 
 void requestReconfigure() {
   pendingReconfigure = true;
+  pendingReconfigureRequestedAtMs = millis();
 }
 
 /**
@@ -371,7 +377,12 @@ void applyPendingReconfigureIfNeeded() {
     return;
   }
 
+  if (millis() - pendingReconfigureRequestedAtMs < kReconfigureResponseGraceMs) {
+    return;
+  }
+
   pendingReconfigure = false;
+  pendingReconfigureRequestedAtMs = 0;
   if (wifi_profiles::active() != nullptr) {
     startStationMode();
     waitForInitialStationConnection();
