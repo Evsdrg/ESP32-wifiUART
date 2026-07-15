@@ -441,10 +441,41 @@ String securityLabel(uint8_t encryptionType) {
 }
 
 /**
- * @brief 触发异步 Wi-Fi 扫描
+ * @brief 完成一次扫描：缓存结果、清理扫描数据、恢复 AP 模式
+ * @param count WiFi.scanComplete() 的返回值（<=0 表示无结果或失败）
+ */
+void finishScan(int16_t count) {
+  scanResultCountValue = 0;
+
+  if (count > 0) {
+    const size_t cappedCount = min(static_cast<size_t>(count), static_cast<size_t>(kMaxWiFiProfiles));
+    for (size_t i = 0; i < cappedCount; ++i) {
+      scanResults[i].ssid = WiFi.SSID(i);
+      scanResults[i].rssi = WiFi.RSSI(i);
+      scanResults[i].channel = static_cast<uint8_t>(WiFi.channel(i));
+      scanResults[i].encryption = static_cast<uint8_t>(WiFi.encryptionType(i));
+    }
+    scanResultCountValue = cappedCount;
+  }
+
+  WiFi.scanDelete();
+
+  // 扫描期间为可见性临时切到 AP_STA，结束后恢复纯 AP
+  if (accessPointActiveFlag) {
+    WiFi.mode(WIFI_AP);
+  }
+
+  scanInProgressFlag = false;
+  scanStartedAtMs = 0;
+  updateStatus();
+}
+
+/**
+ * @brief 触发异步 Wi-Fi 扫描（非阻塞）
  *
  * 扫描期间若 AP 已激活，则临时切换到 AP_STA 混合模式，
- * 扫描结束后恢复纯 AP 模式，保证设备在扫描期间仍可被访问。
+ * 保证设备在扫描期间仍可被访问。实际结果由 pollScan() 在主循环中收割，
+ * 避免阻塞主 loop 导致 TCP-UART 桥接停摆。
  */
 void scanNearby() {
   if (scanInProgressFlag) {
@@ -468,6 +499,12 @@ void scanNearby() {
   finishScan(count);
 }
 
+/**
+ * @brief 轮询异步扫描状态，在完成或超时时收割结果
+ *
+ * 必须在主循环中定期调用。扫描进行中直接返回，不阻塞；
+ * 超过 kWifiScanTimeoutMs 仍未完成则放弃并清理，防止卡死状态。
+ */
 void pollScan() {
   if (!scanInProgressFlag) {
     return;

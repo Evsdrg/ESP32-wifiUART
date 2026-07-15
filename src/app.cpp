@@ -106,6 +106,9 @@ void loop() {
   // 应用待处理的 Wi-Fi 重配置（Profile 切换后触发）
   wifi_manager::applyPendingReconfigureIfNeeded();
 
+  // 轮询异步 Wi-Fi 扫描（非阻塞，扫描期间桥接不中断）
+  wifi_manager::pollScan();
+
   // TCP Server 接受新客户端
   bridge::acceptClientIfNeeded();
 
