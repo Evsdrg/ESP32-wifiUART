@@ -131,6 +131,13 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
               <input id="wifiPassword" name="password" type="password" maxlength="64" placeholder="留空可保留当前槽位已有密码，或用于开放网络">
             </div>
             <div>
+              <label for="keepPassword">密码留空时</label>
+              <select id="keepPassword" name="keepPassword">
+                <option value="1">保留该槽位旧密码</option>
+                <option value="0">保存为空密码</option>
+              </select>
+            </div>
+            <div>
               <label for="activateProfile">保存后立即启用</label>
               <select id="activateProfile" name="activate">
                 <option value="0">否</option>
@@ -143,7 +150,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
           </div>
         </form>
         <div class="status" id="wifi-status"></div>
-        <div class="subtle" id="wifi-password-hint">密码留空仅适用于开放网络，或保留当前槽位已保存的密码。</div>
+        <div class="subtle" id="wifi-password-hint">密码留空默认保留旧密码；如果要开放网络或清空密码，请选择保存为空密码。</div>
         <div class="profiles" id="profiles">当前还没有保存任何 Wi-Fi 配置。</div>
 
         <div class="section">
@@ -186,6 +193,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
     const helpModalTextEl = document.getElementById('help-modal-text');
     const helpModalCloseEl = document.getElementById('help-modal-close');
     const commonBaudRates = ['9600', '19200', '38400', '57600', '115200', '230400', '460800', '921600'];
+    let scanPollTimer = null;
 
     // 初始化 24 个 Profile 槽位下拉选项
     for (let i = 0; i < 24; i += 1) {
@@ -197,8 +205,9 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
 
     // 将当前 UART 参数渲染到表单显示区
     function renderCurrent(data) {
+      const runningText = data.running === false ? ' | UART 已停止' : '';
       currentEl.textContent =
-        `波特率: ${data.baudRate} | 数据位: ${data.dataBits} | 校验位: ${data.parity} | 停止位: ${data.stopBits}`;
+        `波特率: ${data.baudRate} | 数据位: ${data.dataBits} | 校验位: ${data.parity} | 停止位: ${data.stopBits}${runningText}`;
       form.baudRate.value = data.baudRate;
       baudRatePresetEl.value = commonBaudRates.includes(String(data.baudRate)) ? String(data.baudRate) : 'custom';
       form.dataBits.value = String(data.dataBits);
@@ -300,8 +309,9 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       const activeText = data.activeIndex >= 0 ? `槽位 ${data.activeIndex}` : '无';
       const connectedText = data.connectedSsid || '无';
       const ipText = data.ip || '不可用';
+      const storageText = data.storageReady === false ? ' | 配置存储异常，请显式保存以修复' : '';
       wifiCurrentEl.textContent =
-        `当前模式: ${modeText} | 启用槽位: ${activeText} | 已连 Wi‑Fi: ${connectedText} | IP 地址: ${ipText}`;
+        `当前模式: ${modeText} | 启用槽位: ${activeText} | 已连 Wi‑Fi: ${connectedText} | IP 地址: ${ipText}${storageText}`;
 
       if (!data.profiles.length) {
         profilesEl.innerHTML = '<div class="subtle">当前还没有保存任何 Wi-Fi 配置。</div>';
@@ -329,10 +339,45 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       }).join('');
     }
 
+    function clearScanResults() {
+      scanResultsEl.innerHTML = '<div class="subtle">扫描失败，旧结果已清空。</div>';
+    }
+
+    async function fetchScanResults() {
+      const response = await fetch('/api/wifi/scan');
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || '读取扫描结果失败');
+      }
+      return data;
+    }
+
+    async function pollScanUntilComplete() {
+      try {
+        const data = await fetchScanResults();
+        if (data.scanning) {
+          scanStatusEl.textContent = '正在扫描附近 Wi-Fi...';
+          scanPollTimer = window.setTimeout(pollScanUntilComplete, 500);
+          return;
+        }
+
+        scanPollTimer = null;
+        if (data.failed) {
+          throw new Error('Wi-Fi 扫描失败、超时或已取消');
+        }
+        renderScanResults(data);
+        scanStatusEl.textContent = `共扫描到 ${data.networks.length} 个热点。`;
+      } catch (error) {
+        scanPollTimer = null;
+        clearScanResults();
+        scanStatusEl.textContent = error.message;
+      }
+    }
+
     function updatePasswordHint(isOpenNetwork) {
       wifiPasswordHintEl.textContent = isOpenNetwork
         ? '已选择开放网络，可以不填写密码。'
-        : '密码留空仅适用于开放网络，或保留当前槽位已保存的密码。';
+        : '密码留空默认保留旧密码；新网络请填写密码，清空密码请选择保存为空密码。';
     }
 
     async function refreshWiFi() {
@@ -354,7 +399,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       if (!response.ok) {
         throw new Error(data.error || '请求失败');
       }
-      await refreshWiFi();
+      renderWiFi(data);
       return data;
     }
 
@@ -416,9 +461,8 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       const ssid = item.dataset.ssid;
       const isOpenNetwork = item.dataset.open === '1';
       wifiForm.ssid.value = ssid;
-      if (isOpenNetwork) {
-        wifiForm.password.value = '';
-      }
+      wifiForm.password.value = '';
+      wifiForm.keepPassword.value = isOpenNetwork ? '0' : '1';
       wifiForm.activate.value = '1';
       updatePasswordHint(isOpenNetwork);
       wifiStatusEl.textContent = `已选择 ${ssid || '<hidden>'} 并填入 Wi-Fi 表单。`;
@@ -426,15 +470,28 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
 
     scanButton.addEventListener('click', async () => {
       scanStatusEl.textContent = '正在扫描附近 Wi-Fi...';
+      if (scanPollTimer !== null) {
+        window.clearTimeout(scanPollTimer);
+        scanPollTimer = null;
+      }
+
       try {
         const response = await fetch('/api/wifi/scan', { method: 'POST' });
         const data = await response.json();
         if (!response.ok) {
           throw new Error(data.error || '扫描失败');
         }
-        renderScanResults(data);
-        scanStatusEl.textContent = `共扫描到 ${data.networks.length} 个热点。`;
+        if (data.scanning) {
+          scanPollTimer = window.setTimeout(pollScanUntilComplete, 500);
+        } else {
+          if (data.failed) {
+            throw new Error('Wi-Fi 扫描失败、超时或已取消');
+          }
+          renderScanResults(data);
+          scanStatusEl.textContent = `共扫描到 ${data.networks.length} 个热点。`;
+        }
       } catch (error) {
+        clearScanResults();
         scanStatusEl.textContent = error.message;
       }
     });

@@ -17,6 +17,8 @@
 #include "debug_log.h"
 
 #include <WiFi.h>
+#include <cerrno>
+#include <sys/socket.h>
 
 namespace wifi_uart {
 namespace bridge {
@@ -86,6 +88,32 @@ uint32_t tcpToUartOverflowEvents = 0;
 
 /** @brief TCP 写入未完成（缓冲区满导致截断）次数 */
 uint32_t tcpPartialWriteEvents = 0;
+
+/** @brief 单次 loop 允许提交给 TCP socket 的最大字节数 */
+constexpr size_t kTcpSendBudgetPerLoop = kIoChunkSize * 4;
+
+int sendNonBlocking(WiFiClient &client, const uint8_t *data, size_t size) {
+  const int socketFd = client.fd();
+  if (socketFd < 0) {
+    errno = EBADF;
+    return -1;
+  }
+
+  return send(socketFd, data, size, MSG_DONTWAIT | MSG_NOSIGNAL);
+}
+
+void drainUartInput(HardwareSerial &uartPort) {
+  uint8_t buffer[kIoChunkSize];
+  size_t bytesToDiscard = static_cast<size_t>(uartPort.available());
+  while (bytesToDiscard > 0) {
+    const size_t requestSize = min(bytesToDiscard, sizeof(buffer));
+    const size_t readSize = uartPort.read(buffer, requestSize);
+    if (readSize == 0) {
+      break;
+    }
+    bytesToDiscard -= readSize;
+  }
+}
 
 }  // namespace
 
@@ -160,6 +188,7 @@ void markActivity() {
  */
 void disconnectTcpClient(const char *reason) {
   const bool hadSession = tcpClientActive;
+  clearSessionBuffers();
   tcpClient.stop();              // 关闭 socket 并释放资源
   tcpClientActive = false;
   if (hadSession) {
@@ -177,7 +206,7 @@ void disconnectTcpClient(const char *reason) {
  *
  * 每次 loop 最多接受一个客户端，保证单一连接。
  */
-void acceptClientIfNeeded() {
+void acceptClientIfNeeded(HardwareSerial &uartPort, bool allowNewClient) {
   if (!tcpServerStarted) {
     return;
   }
@@ -196,7 +225,13 @@ void acceptClientIfNeeded() {
   if (!newClient) {
     return;  // 尚无待处理的连接
   }
+  if (!allowNewClient) {
+    newClient.stop();
+    return;
+  }
 
+  drainUartInput(uartPort);
+  clearSessionBuffers();
   newClient.setNoDelay(true);  // 立即发送，无延迟
   tcpClient = newClient;
   tcpClientActive = true;
@@ -288,12 +323,17 @@ void flushTcpBufferToUart(HardwareSerial &uartPort) {
  * 缓冲区满时记录反压事件（并限速日志输出）。
  */
 void pullUartIntoBuffer(HardwareSerial &uartPort) {
+  if (!isTcpClientConnected()) {
+    drainUartInput(uartPort);
+    return;
+  }
+
   uint8_t buffer[kIoChunkSize];
   while (uartPort.available() > 0 && uartToTcpBuffer.freeSpace() > 0) {
     const size_t requestSize = min(
         static_cast<size_t>(uartPort.available()),
         min(sizeof(buffer), uartToTcpBuffer.freeSpace()));
-    const size_t readSize = uartPort.readBytes(buffer, requestSize);
+    const size_t readSize = uartPort.read(buffer, requestSize);
     if (readSize == 0) {
       break;
     }
@@ -317,8 +357,8 @@ void pullUartIntoBuffer(HardwareSerial &uartPort) {
 /**
  * @brief 将 uart→tcp 缓冲区的内容 flush 到已连接的 TCP 客户端
  *
- * 若 TCP 写入量小于请求量（written < chunkSize），说明网络发送缓慢，
- * 此时停止等待下次 loop 再继续（避免阻塞）。
+ * 直接对底层 socket 使用非阻塞 send，并限制每次 loop 的发送预算。
+ * EAGAIN/EWOULDBLOCK 时保留缓冲区数据等待下轮，其他错误断开会话。
  */
 void flushUartBufferToTcp() {
   if (!isTcpClientConnected() || uartToTcpBuffer.size() == 0) {
@@ -326,29 +366,40 @@ void flushUartBufferToTcp() {
   }
 
   uint8_t buffer[kIoChunkSize];
-  while (isTcpClientConnected() && uartToTcpBuffer.size() > 0) {
+  size_t sendBudget = kTcpSendBudgetPerLoop;
+  while (isTcpClientConnected() && uartToTcpBuffer.size() > 0 && sendBudget > 0) {
     if (!tcpClient.connected()) {
       disconnectTcpClient("peer reset before write");
       break;
     }
 
-    const size_t chunkSize = min(uartToTcpBuffer.size(), sizeof(buffer));
+    const size_t chunkSize = min(uartToTcpBuffer.size(), min(sizeof(buffer), sendBudget));
     uartToTcpBuffer.peek(buffer, chunkSize);
-    const size_t written = tcpClient.write(buffer, chunkSize);
-    if (written == 0) {
-      // TCP 发送缓冲区满，停止等待
-      if (!tcpClient.connected()) {
-        disconnectTcpClient("peer reset during write");
+    const int written = sendNonBlocking(tcpClient, buffer, chunkSize);
+    if (written < 0) {
+      const int socketError = errno;
+      if (socketError == EAGAIN || socketError == EWOULDBLOCK || socketError == EINTR) {
+        break;
       }
+
+      debugPrintf("TCP socket send failed: errno=%d\n", socketError);
+      disconnectTcpClient("socket send failed");
       break;
     }
 
-    if (written < chunkSize) {
+    if (written == 0) {
+      disconnectTcpClient("socket send returned zero");
+      break;
+    }
+
+    const size_t sentSize = static_cast<size_t>(written);
+    if (sentSize < chunkSize) {
       ++tcpPartialWriteEvents;  // 记录部分写入
     }
 
-    uartToTcpBuffer.discard(written);
-    uartToTcpBytes += written;
+    uartToTcpBuffer.discard(sentSize);
+    uartToTcpBytes += sentSize;
+    sendBudget -= sentSize;
     markActivity();
   }
 }

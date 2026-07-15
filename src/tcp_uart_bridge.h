@@ -44,7 +44,7 @@ void stopTcpServer();
  *
  * 在 TCP Server 未启动时直接返回；若当前无客户端则尝试接受新连接。
  */
-void acceptClientIfNeeded();
+void acceptClientIfNeeded(HardwareSerial &uartPort, bool allowNewClient = true);
 
 /**
  * @brief 主动断开当前 TCP 客户端连接

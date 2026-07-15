@@ -12,6 +12,9 @@
 #include "tcp_uart_bridge.h"
 
 #include <cinttypes>
+#include <driver/uart.h>
+#include <freertos/FreeRTOS.h>
+#include <soc/soc_caps.h>
 
 namespace wifi_uart {
 namespace uart_port {
@@ -24,6 +27,56 @@ HardwareSerial uartPort(1);
 /** @brief 当前生效的 UART 参数（内存级副本，不依赖 UART 驱动） */
 UartSettings currentSettings = {kUartBaudRate, 8, 'N', 1};
 
+/** @brief UART 驱动是否已经完整启动并配置成功 */
+bool uartRunning = false;
+
+bool startUart(const UartSettings &settings, uint32_t serialConfig) {
+  uartRunning = false;
+  if (uartPort.setRxBufferSize(kUartDriverRxBufferSize) != kUartDriverRxBufferSize) {
+    debugPrintln("Failed to configure UART1 RX buffer size");
+    return false;
+  }
+
+  if (uartPort.setTxBufferSize(kUartDriverTxBufferSize) != kUartDriverTxBufferSize) {
+    debugPrintln("Failed to configure UART1 TX buffer size");
+    return false;
+  }
+
+  uartPort.begin(
+      settings.baudRate,
+      serialConfig,
+      UART1_RX_PIN,
+      UART1_TX_PIN,
+      false,
+      20000UL,
+      static_cast<uint8_t>(UART_FIFO_THRESHOLD));
+  if (!uartPort || uartPort.baudRate() == 0) {
+    debugPrintln("Failed to start UART1 driver");
+    uartPort.end();
+    return false;
+  }
+
+  if (!uartPort.setRxFIFOFull(UART_FIFO_THRESHOLD)) {
+    debugPrintln("Failed to configure UART1 RX FIFO threshold");
+    uartPort.end();
+    return false;
+  }
+
+  uartPort.setTimeout(0);
+  uartRunning = true;
+  return true;
+}
+
+uint32_t txDrainTimeoutMs() {
+  const uint32_t baudRate = max(currentSettings.baudRate, 300UL);
+  const uint64_t queuedBits =
+      static_cast<uint64_t>(kUartDriverTxBufferSize + SOC_UART_FIFO_LEN) * 12ULL;
+  const uint64_t calculatedMs = (queuedBits * 1000ULL + baudRate - 1) / baudRate + 100ULL;
+  const uint64_t boundedMs =
+      calculatedMs < 100 ? 100 : (calculatedMs > 1000 ? 1000 : calculatedMs);
+  return static_cast<uint32_t>(boundedMs);
+}
+
 }  // namespace
 
 HardwareSerial &serial() {
@@ -32,6 +85,10 @@ HardwareSerial &serial() {
 
 const UartSettings &settings() {
   return currentSettings;
+}
+
+bool isRunning() {
+  return uartRunning;
 }
 
 /**
@@ -115,38 +172,54 @@ bool mapUartConfig(const UartSettings &settings, uint32_t &serialConfig) {
 /**
  * @brief 将新 UART 参数应用到硬件
  *
- * 变更前清空桥接缓冲区并 flush UART 发送队列；
- * 变更后等待 UART 硬件 FIFO 排空（内部有 20ms 等待）。
+ * 变更前有界等待旧 UART TX 队列排空；超时则保留旧配置不变。
+ * 重建失败时尽量恢复先前配置，并通过 isRunning() 暴露最终状态。
  *
  * @param settings 新的 UART 参数
  * @return true 应用成功
  */
 bool applySettings(const UartSettings &settings) {
+  if (settings.baudRate < 300 || settings.baudRate > SOC_UART_BITRATE_MAX) {
+    return false;
+  }
+
   uint32_t serialConfig = SERIAL_8N1;
   if (!mapUartConfig(settings, serialConfig)) {
     return false;
   }
 
-  // 参数变更前先清空 session 缓冲（避免新旧参数混用导致乱码）
+  const bool wasRunning = uartRunning;
+  const UartSettings previousSettings = currentSettings;
+  uint32_t previousSerialConfig = SERIAL_8N1;
+  if (!mapUartConfig(previousSettings, previousSerialConfig)) {
+    return false;
+  }
+
+  if (wasRunning) {
+    const esp_err_t waitResult = uart_wait_tx_done(
+        UART_NUM_1,
+        pdMS_TO_TICKS(txDrainTimeoutMs()));
+    if (waitResult != ESP_OK) {
+      debugPrintf("UART1 TX drain failed before reconfigure: %s\n", esp_err_to_name(waitResult));
+      return false;
+    }
+  }
+
   bridge::clearSessionBuffers();
-  uartPort.flush();
-  uartPort.end();
+  if (wasRunning) {
+    uartRunning = false;
+    uartPort.end();
+  }
 
-  // 配置驱动内部缓冲区大小（8192/4092 是平衡内存与吞吐的常用值）
-  uartPort.setRxBufferSize(kUartDriverRxBufferSize);
-  uartPort.setTxBufferSize(kUartDriverTxBufferSize);
+  if (!startUart(settings, serialConfig)) {
+    uartRunning = false;
+    uartPort.end();
+    if (wasRunning && !startUart(previousSettings, previousSerialConfig)) {
+      debugPrintln("Failed to restore previous UART1 configuration");
+    }
+    return false;
+  }
 
-  // 重新打开 UART1：最后两个参数分别是超时不等待和 FIFO 满阈值
-  uartPort.begin(
-      settings.baudRate,
-      serialConfig,
-      UART1_RX_PIN,
-      UART1_TX_PIN,
-      false,       // invert（不翻转信号极性）
-      20000UL,     // timeout（等待 FIFO 排空前最多等 20ms）
-      UART_FIFO_THRESHOLD);  // RX FIFO 满阈值（平台可配置档位）
-
-  uartPort.setTimeout(0);  // readBytes() 立即返回，不阻塞等待
   currentSettings = settings;
 
   debugPrintf(

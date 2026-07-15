@@ -45,6 +45,9 @@ bool accessPointActive();
 /** @brief Wi-Fi 扫描是否正在进行 */
 bool scanInProgress();
 
+/** @brief 最近一次 Wi-Fi 扫描是否失败、超时或被取消 */
+bool scanFailed();
+
 /** @brief 当前是否工作在 STA 模式 */
 bool useStationMode();
 
@@ -67,6 +70,9 @@ String ipAddress();
  * 扫描期间设备仍可正常通信。扫描完成后结果可通过 scanResult() 获取。
  */
 void scanNearby();
+
+/** @brief 轮询异步 Wi-Fi 扫描状态并在完成时缓存结果 */
+void pollScan();
 
 /** @brief 返回最近一次扫描的结果数量 */
 size_t scanResultCount();

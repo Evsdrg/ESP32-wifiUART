@@ -17,6 +17,7 @@
 #include "wifi_profiles.h"
 
 #include <WiFi.h>
+#include <esp_wifi.h>
 
 namespace wifi_uart {
 namespace wifi_manager {
@@ -35,11 +36,26 @@ bool accessPointActiveFlag = false;
 /** @brief STA 此前是否曾成功连接（用于检测断线事件） */
 bool stationWasConnected = false;
 
+/** @brief AP fallback 模式下是否应后台重试激活的 STA profile */
+bool retryStationFromAccessPointFlag = false;
+
+/** @brief AP fallback 模式下是否已经发起 STA 重试 */
+bool stationRetryAttemptActive = false;
+
 /** @brief Wi-Fi 扫描是否进行中 */
 bool scanInProgressFlag = false;
+bool scanFailedFlag = false;
+
+/** @brief 异步扫描启动时间戳（用于超时保护） */
+uint32_t scanStartedAtMs = 0;
 
 /** @brief 是否有待处理的 Wi-Fi 重配置请求 */
 bool pendingReconfigure = false;
+
+/** @brief 最近一次 Wi-Fi 重配置请求时间，用于给 HTTP 响应预留发送窗口 */
+uint32_t pendingReconfigureRequestedAtMs = 0;
+
+constexpr uint32_t kReconfigureResponseGraceMs = 250;
 
 /** @brief 最近一次 Wi-Fi 扫描结果缓存 */
 WiFiScanResult scanResults[kMaxWiFiProfiles] = {};
@@ -55,6 +71,86 @@ void updateStatus() {
   if (statusUpdateCallback != nullptr) {
     statusUpdateCallback();
   }
+}
+
+bool applyWiFiRadioSettings() {
+  bool success = true;
+  if (!WiFi.setSleep(false)) {
+    debugPrintln("Failed to disable WiFi sleep");
+    success = false;
+  }
+#if CONFIGURE_WIFI_TX_POWER
+  if (!WiFi.setTxPower(kWifiTxPower)) {
+    debugPrintln("Failed to configure WiFi TX power");
+    success = false;
+  }
+#endif
+  return success;
+}
+
+bool setWiFiMode(wifi_mode_t mode) {
+  if (!WiFi.mode(mode)) {
+    debugPrintf("Failed to set WiFi mode: %d\n", static_cast<int>(mode));
+    return false;
+  }
+
+  if (mode != WIFI_MODE_NULL && !applyWiFiRadioSettings()) {
+    debugPrintf("WiFi mode %d started with incomplete radio settings\n", static_cast<int>(mode));
+  }
+  return true;
+}
+
+void stopAndDeleteScan() {
+  const esp_err_t stopResult = esp_wifi_scan_stop();
+  if (stopResult != ESP_OK) {
+    debugPrintf("Failed to stop WiFi scan: %s\n", esp_err_to_name(stopResult));
+  }
+  WiFi.scanDelete();
+}
+
+/** @brief 完成一次异步扫描并缓存结果 */
+void finishScan(int16_t count, bool stopRunningScan = false) {
+  scanFailedFlag = count < 0;
+  scanResultCountValue = 0;
+
+  if (count > 0) {
+    const size_t cappedCount = min(static_cast<size_t>(count), static_cast<size_t>(kMaxWiFiProfiles));
+    for (size_t i = 0; i < cappedCount; ++i) {
+      scanResults[i].ssid = WiFi.SSID(i);
+      scanResults[i].rssi = WiFi.RSSI(i);
+      scanResults[i].channel = static_cast<uint8_t>(WiFi.channel(i));
+      scanResults[i].encryption = static_cast<uint8_t>(WiFi.encryptionType(i));
+    }
+    scanResultCountValue = cappedCount;
+  }
+
+  if (stopRunningScan) {
+    stopAndDeleteScan();
+  } else {
+    WiFi.scanDelete();
+  }
+
+  if (accessPointActiveFlag && !stationRetryAttemptActive) {
+    setWiFiMode(WIFI_AP);
+  }
+
+  scanInProgressFlag = false;
+  scanStartedAtMs = 0;
+  updateStatus();
+}
+
+/** @brief Wi-Fi 模式切换前取消正在进行的异步扫描 */
+void cancelScanIfNeeded() {
+  if (!scanInProgressFlag) {
+    return;
+  }
+
+  stopAndDeleteScan();
+  scanInProgressFlag = false;
+  scanFailedFlag = true;
+  scanStartedAtMs = 0;
+  scanResultCountValue = 0;
+  updateStatus();
 }
 
 /** @brief 停止 TCP Server（Wi-Fi 模式切换时调用） */
@@ -97,9 +193,14 @@ void logStationReady() {
  * 允许用户连接并通过网页配置 Wi-Fi 凭据。
  */
 void startAccessPoint() {
+  cancelScanIfNeeded();
   useStationModeFlag = false;
   accessPointActiveFlag = false;
-  WiFi.mode(WIFI_AP);
+  retryStationFromAccessPointFlag = false;
+  stationRetryAttemptActive = false;
+  if (!setWiFiMode(WIFI_AP)) {
+    return;
+  }
 
   if (!WiFi.softAP(AP_SSID, AP_PASSWORD)) {
     debugPrintln("Failed to start WiFi AP");
@@ -127,7 +228,7 @@ void stopStationBeforeAccessPoint() {
   WiFi.setAutoReconnect(false);
   WiFi.disconnect(false, false);
   delay(100);
-  WiFi.mode(WIFI_MODE_NULL);
+  setWiFiMode(WIFI_MODE_NULL);
   delay(100);
 }
 
@@ -144,8 +245,11 @@ void startStationMode() {
     return;
   }
 
+  cancelScanIfNeeded();
   useStationModeFlag = true;
   accessPointActiveFlag = false;
+  retryStationFromAccessPointFlag = false;
+  stationRetryAttemptActive = false;
   stationWasConnected = false;
   stopTcpServer();
   if (bridge::isTcpClientConnected()) {
@@ -153,7 +257,10 @@ void startStationMode() {
   }
   WiFi.disconnect(true, true);
   delay(100);
-  WiFi.mode(WIFI_STA);
+  if (!setWiFiMode(WIFI_STA)) {
+    useStationModeFlag = false;
+    return;
+  }
   WiFi.setAutoReconnect(true);
   WiFi.begin(activeProfile->ssid.c_str(), activeProfile->password.c_str());
   lastWifiReconnectAttemptMs = millis();
@@ -185,8 +292,67 @@ void waitForInitialStationConnection() {
     debugPrintln("Initial WiFi connect timed out, falling back to AP mode");
     stopStationBeforeAccessPoint();
     startAccessPoint();
+    retryStationFromAccessPointFlag = wifi_profiles::active() != nullptr;
+    lastWifiReconnectAttemptMs = millis();
     startTcpServer();
   }
+}
+
+/** @brief AP fallback 保持可访问，同时周期性后台重试激活的 STA profile */
+void handleAccessPointStationRetry() {
+  if (!accessPointActiveFlag || !retryStationFromAccessPointFlag) {
+    return;
+  }
+
+  const WiFiProfile *activeProfile = wifi_profiles::active();
+  if (activeProfile == nullptr) {
+    retryStationFromAccessPointFlag = false;
+    stationRetryAttemptActive = false;
+    return;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    debugPrintln("STA recovered from AP fallback");
+    cancelScanIfNeeded();
+    if (bridge::isTcpClientConnected()) {
+      disconnectTcpClient("sta recovered from ap fallback");
+    }
+    stopTcpServer();
+    WiFi.softAPdisconnect(true);
+    delay(100);
+    if (!setWiFiMode(WIFI_STA)) {
+      startAccessPoint();
+      retryStationFromAccessPointFlag = true;
+      lastWifiReconnectAttemptMs = millis();
+      startTcpServer();
+      return;
+    }
+    WiFi.setAutoReconnect(true);
+    accessPointActiveFlag = false;
+    useStationModeFlag = true;
+    retryStationFromAccessPointFlag = false;
+    stationRetryAttemptActive = false;
+    stationWasConnected = true;
+    bridge::markWifiReconnect();
+    logStationReady();
+    startTcpServer();
+    updateStatus();
+    return;
+  }
+
+  if (scanInProgressFlag || millis() - lastWifiReconnectAttemptMs < kWifiFallbackRetryIntervalMs) {
+    return;
+  }
+
+  debugPrintln("Retrying WiFi connection from AP fallback");
+  if (!setWiFiMode(WIFI_AP_STA)) {
+    lastWifiReconnectAttemptMs = millis();
+    return;
+  }
+  WiFi.disconnect(false, false);
+  WiFi.begin(activeProfile->ssid.c_str(), activeProfile->password.c_str());
+  stationRetryAttemptActive = true;
+  lastWifiReconnectAttemptMs = millis();
 }
 
 }  // namespace
@@ -218,6 +384,7 @@ void begin(void (*callback)()) {
  */
 void handleStationMode() {
   if (!useStationModeFlag) {
+    handleAccessPointStationRetry();
     return;
   }
 
@@ -253,6 +420,7 @@ void handleStationMode() {
 
 void requestReconfigure() {
   pendingReconfigure = true;
+  pendingReconfigureRequestedAtMs = millis();
 }
 
 /**
@@ -266,7 +434,12 @@ void applyPendingReconfigureIfNeeded() {
     return;
   }
 
+  if (millis() - pendingReconfigureRequestedAtMs < kReconfigureResponseGraceMs) {
+    return;
+  }
+
   pendingReconfigure = false;
+  pendingReconfigureRequestedAtMs = 0;
   if (wifi_profiles::active() != nullptr) {
     startStationMode();
     waitForInitialStationConnection();
@@ -292,6 +465,10 @@ bool accessPointActive() {
 
 bool scanInProgress() {
   return scanInProgressFlag;
+}
+
+bool scanFailed() {
+  return scanFailedFlag;
 }
 
 bool useStationMode() {
@@ -336,52 +513,56 @@ String securityLabel(uint8_t encryptionType) {
 }
 
 /**
- * @brief 触发异步 Wi-Fi 扫描
+ * @brief 触发异步 Wi-Fi 扫描（非阻塞）
  *
  * 扫描期间若 AP 已激活，则临时切换到 AP_STA 混合模式，
- * 扫描结束后恢复纯 AP 模式，保证设备在扫描期间仍可被访问。
+ * 保证设备在扫描期间仍可被访问。实际结果由 pollScan() 在主循环中收割。
  */
 void scanNearby() {
-  scanInProgressFlag = true;
-  updateStatus();
-
-  if (accessPointActiveFlag) {
-    WiFi.mode(WIFI_AP_STA);
-  }
-
-  scanResultCountValue = 0;
-  int16_t count = WiFi.scanNetworks(true, true);
-  while (count == WIFI_SCAN_RUNNING) {
-    delay(30);
-    updateStatus();
-    count = WiFi.scanComplete();
-  }
-  if (count <= 0) {
-    WiFi.scanDelete();
-    if (accessPointActiveFlag) {
-      WiFi.mode(WIFI_AP);
-    }
-    scanInProgressFlag = false;
-    updateStatus();
+  if (scanInProgressFlag) {
     return;
   }
 
-  const size_t cappedCount = min(static_cast<size_t>(count), static_cast<size_t>(kMaxWiFiProfiles));
-  for (size_t i = 0; i < cappedCount; ++i) {
-    scanResults[i].ssid = WiFi.SSID(i);
-    scanResults[i].rssi = WiFi.RSSI(i);
-    scanResults[i].channel = static_cast<uint8_t>(WiFi.channel(i));
-    scanResults[i].encryption = static_cast<uint8_t>(WiFi.encryptionType(i));
-  }
-  scanResultCountValue = cappedCount;
-  WiFi.scanDelete();
+  scanInProgressFlag = true;
+  scanFailedFlag = false;
+  scanStartedAtMs = millis();
+  scanResultCountValue = 0;
+  updateStatus();
 
   if (accessPointActiveFlag) {
-    WiFi.mode(WIFI_AP);
+    if (!setWiFiMode(WIFI_AP_STA)) {
+      scanInProgressFlag = false;
+      scanFailedFlag = true;
+      scanStartedAtMs = 0;
+      updateStatus();
+      return;
+    }
   }
 
-  scanInProgressFlag = false;
-  updateStatus();
+  const int16_t count = WiFi.scanNetworks(true, true);
+  if (count == WIFI_SCAN_RUNNING) {
+    return;
+  }
+
+  finishScan(count);
+}
+
+/** @brief 轮询异步扫描状态，并在 12 秒超时后取消 */
+void pollScan() {
+  if (!scanInProgressFlag) {
+    return;
+  }
+
+  const int16_t count = WiFi.scanComplete();
+  if (count == WIFI_SCAN_RUNNING) {
+    if (millis() - scanStartedAtMs >= kWifiScanTimeoutMs) {
+      debugPrintln("WiFi scan timed out");
+      finishScan(WIFI_SCAN_FAILED, true);
+    }
+    return;
+  }
+
+  finishScan(count);
 }
 
 size_t scanResultCount() {

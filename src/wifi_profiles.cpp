@@ -2,11 +2,8 @@
  * @file   wifi_profiles.cpp
  * @brief  Wi-Fi 凭据 NVS 持久化管理
  *
- * 使用 Preferences（基于 NVS分区）存储最多 kMaxWiFiProfiles 个凭据槽位，
- * 每个槽位以 "sXX"/"pXX" 键名存储 SSID/密码，以 "aidx" 存储激活槽位编号。
- *
- * 首次启动时（如 build flags 中定义了 WIFI_SSID），自动将默认凭据种子写入槽位 0，
- * 方便开箱即用而无需通过网页配置。
+ * 所有 Profile 与 active index 存储在单个 "wcfg" blob 中，使保存、激活和删除
+ * 都由一次 NVS commit 原子完成。旧版 "sXX"/"pXX"/"aidx" 键会在首次加载时迁移。
  */
 
 #include "wifi_profiles.h"
@@ -21,115 +18,280 @@ namespace wifi_profiles {
 namespace {
 
 Preferences preferencesStore;
-
-/** @brief 内存中缓存的所有凭据（启动时从 NVS 加载） */
 WiFiProfile profiles[kMaxWiFiProfiles] = {};
-
-/** @brief 当前激活的槽位编号；-1 表示无激活 */
 int8_t activeIndex_ = -1;
+bool storageReady_ = false;
 
-/**
- * @brief 生成指定槽位的 NVS 键名
- *
- * SSID 键格式：sXX（如 s00, s01）
- * 密码键格式：pXX（如 p00, p01）
- */
-void makeWiFiProfileKeys(uint8_t index, char *ssidKey, char *passwordKey) {
+constexpr char kConfigKey[] = "wcfg";
+constexpr char kMigrationKey[] = "wcfgok";
+constexpr uint8_t kConfigMagic[] = {'W', 'F', 'C', '1'};
+constexpr size_t kConfigHeaderSize = 8;
+constexpr size_t kProfileSlotSize = 4 + 32 + 64;
+constexpr size_t kConfigSize = kConfigHeaderSize + kMaxWiFiProfiles * kProfileSlotSize;
+
+uint8_t encodedConfig[kConfigSize] = {};
+uint8_t verifiedConfig[kConfigSize] = {};
+
+int countStored() {
+  int count = 0;
+  for (uint8_t i = 0; i < kMaxWiFiProfiles; ++i) {
+    if (profiles[i].inUse) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+void clearRuntimeConfig() {
+  for (WiFiProfile &profile : profiles) {
+    profile = {false, String(), String()};
+  }
+  activeIndex_ = -1;
+}
+
+String decodeString(const uint8_t *data, uint8_t length) {
+  String value;
+  value.reserve(length);
+  for (uint8_t i = 0; i < length; ++i) {
+    value += static_cast<char>(data[i]);
+  }
+  return value;
+}
+
+bool encodeConfig() {
+  if (activeIndex_ >= 0 &&
+      (activeIndex_ >= kMaxWiFiProfiles || !profiles[activeIndex_].inUse)) {
+    return false;
+  }
+
+  memset(encodedConfig, 0, sizeof(encodedConfig));
+  memcpy(encodedConfig, kConfigMagic, sizeof(kConfigMagic));
+  encodedConfig[4] = activeIndex_ >= 0 ? static_cast<uint8_t>(activeIndex_) : 255;
+  encodedConfig[5] = kMaxWiFiProfiles;
+
+  for (uint8_t i = 0; i < kMaxWiFiProfiles; ++i) {
+    const WiFiProfile &profile = profiles[i];
+    if (profile.ssid.length() > 32 || profile.password.length() > 64 ||
+        (profile.inUse && profile.ssid.isEmpty())) {
+      return false;
+    }
+
+    uint8_t *slot = encodedConfig + kConfigHeaderSize + i * kProfileSlotSize;
+    slot[0] = profile.inUse ? 1 : 0;
+    slot[1] = static_cast<uint8_t>(profile.ssid.length());
+    slot[2] = static_cast<uint8_t>(profile.password.length());
+    if (profile.inUse) {
+      memcpy(slot + 4, profile.ssid.c_str(), profile.ssid.length());
+      memcpy(slot + 4 + 32, profile.password.c_str(), profile.password.length());
+    }
+  }
+  return true;
+}
+
+bool persistConfig() {
+  if (!encodeConfig()) {
+    return false;
+  }
+
+  const size_t writeResult =
+      preferencesStore.putBytes(kConfigKey, encodedConfig, sizeof(encodedConfig));
+  memset(verifiedConfig, 0, sizeof(verifiedConfig));
+  const bool exact = preferencesStore.isKey(kConfigKey) &&
+      preferencesStore.getBytesLength(kConfigKey) == sizeof(verifiedConfig) &&
+      preferencesStore.getBytes(kConfigKey, verifiedConfig, sizeof(verifiedConfig)) ==
+          sizeof(verifiedConfig) &&
+      memcmp(encodedConfig, verifiedConfig, sizeof(encodedConfig)) == 0;
+  if (!exact) {
+    debugPrintf("Failed to persist Wi-Fi config blob, writeResult=%u\n", writeResult);
+  }
+  return exact;
+}
+
+bool persistMigrationMarker() {
+  if (preferencesStore.isKey(kMigrationKey) &&
+      preferencesStore.getType(kMigrationKey) == PT_U8 &&
+      preferencesStore.getUChar(kMigrationKey, 0) == 1) {
+    return true;
+  }
+  preferencesStore.putUChar(kMigrationKey, 1);
+  return preferencesStore.isKey(kMigrationKey) &&
+      preferencesStore.getType(kMigrationKey) == PT_U8 &&
+      preferencesStore.getUChar(kMigrationKey, 0) == 1;
+}
+
+void removeLegacyConfig() {
+  for (uint8_t i = 0; i < kMaxWiFiProfiles; ++i) {
+    char ssidKey[4] = {};
+    char passwordKey[4] = {};
+    snprintf(ssidKey, sizeof(ssidKey), "s%02u", i);
+    snprintf(passwordKey, sizeof(passwordKey), "p%02u", i);
+    if (preferencesStore.isKey(ssidKey)) {
+      preferencesStore.remove(ssidKey);
+    }
+    if (preferencesStore.isKey(passwordKey)) {
+      preferencesStore.remove(passwordKey);
+    }
+  }
+  if (preferencesStore.isKey("aidx")) {
+    preferencesStore.remove("aidx");
+  }
+}
+
+bool commitConfig() {
+  if (!persistMigrationMarker() || !persistConfig()) {
+    return false;
+  }
+  removeLegacyConfig();
+  storageReady_ = true;
+  return true;
+}
+
+bool loadConfigBlob() {
+  if (preferencesStore.getBytesLength(kConfigKey) != sizeof(verifiedConfig) ||
+      preferencesStore.getBytes(kConfigKey, verifiedConfig, sizeof(verifiedConfig)) !=
+          sizeof(verifiedConfig) ||
+      memcmp(verifiedConfig, kConfigMagic, sizeof(kConfigMagic)) != 0 ||
+      verifiedConfig[5] != kMaxWiFiProfiles) {
+    return false;
+  }
+
+  for (uint8_t i = 0; i < kMaxWiFiProfiles; ++i) {
+    const uint8_t *slot = verifiedConfig + kConfigHeaderSize + i * kProfileSlotSize;
+    if (slot[0] > 1 || slot[1] > 32 || slot[2] > 64 ||
+        (slot[0] == 1 && slot[1] == 0)) {
+      return false;
+    }
+  }
+
+  for (uint8_t i = 0; i < kMaxWiFiProfiles; ++i) {
+    const uint8_t *slot = verifiedConfig + kConfigHeaderSize + i * kProfileSlotSize;
+    profiles[i] = slot[0] == 1
+        ? WiFiProfile{
+              true,
+              decodeString(slot + 4, slot[1]),
+              decodeString(slot + 4 + 32, slot[2])}
+        : WiFiProfile{false, String(), String()};
+  }
+
+  const uint8_t savedIndex = verifiedConfig[4];
+  activeIndex_ = savedIndex < kMaxWiFiProfiles && profiles[savedIndex].inUse
+      ? static_cast<int8_t>(savedIndex)
+      : -1;
+  return savedIndex == 255 || activeIndex_ >= 0;
+}
+
+void makeLegacyKeys(uint8_t index, char *ssidKey, char *passwordKey) {
   snprintf(ssidKey, 4, "s%02u", index);
   snprintf(passwordKey, 4, "p%02u", index);
 }
 
-/** @brief 返回已存储（inUse=true）的凭据数量 */
-int countStored() {
-  int cnt = 0;
-  for (uint8_t i = 0; i < kMaxWiFiProfiles; ++i) {
-    if (profiles[i].inUse) {
-      ++cnt;
-    }
+bool loadLegacyString(const char *key, size_t maxLength, String &value) {
+  if (!preferencesStore.isKey(key)) {
+    value = String();
+    return true;
   }
-  return cnt;
+  if (preferencesStore.getType(key) != PT_STR) {
+    return false;
+  }
+  const size_t storedLength = preferencesStore.getStringLength(key);
+  if (storedLength == 0 || storedLength - 1 > maxLength) {
+    return false;
+  }
+  value = preferencesStore.getString(key, String());
+  return value.length() + 1 == storedLength;
 }
 
-/** @brief 将 activeIndex_ 写入 NVS（255 表示无激活） */
-void persistActiveIndex() {
-  preferencesStore.putUChar("aidx", activeIndex_ >= 0 ? static_cast<uint8_t>(activeIndex_) : 255);
-}
-
-/**
- * @brief 从 NVS 加载所有凭据到内存
- *
- * 遍历所有槽位读取 "sXX"/"pXX"；读取 "aidx" 作为激活槽位。
- * 仅当目标槽位已有 SSID 时才标记 inUse=true。
- */
-void loadProfiles() {
+bool loadLegacyConfig() {
   for (uint8_t i = 0; i < kMaxWiFiProfiles; ++i) {
-    char ssidKey[4] = {0};
-    char passwordKey[4] = {0};
-    makeWiFiProfileKeys(i, ssidKey, passwordKey);
-    const String ssid =
-        preferencesStore.isKey(ssidKey) ? preferencesStore.getString(ssidKey, String()) : String();
-    const String password =
-        preferencesStore.isKey(passwordKey) ? preferencesStore.getString(passwordKey, String()) : String();
+    char ssidKey[4] = {};
+    char passwordKey[4] = {};
+    makeLegacyKeys(i, ssidKey, passwordKey);
+    String ssid;
+    String password;
+    if (!loadLegacyString(ssidKey, 32, ssid) ||
+        !loadLegacyString(passwordKey, 64, password)) {
+      return false;
+    }
     profiles[i] = {!ssid.isEmpty(), ssid, password};
   }
 
-  const uint8_t savedIndex = preferencesStore.getUChar("aidx", 255);
-  if (savedIndex < kMaxWiFiProfiles && profiles[savedIndex].inUse) {
-    activeIndex_ = static_cast<int8_t>(savedIndex);
-  } else {
-    activeIndex_ = -1;
+  uint8_t savedIndex = 255;
+  if (preferencesStore.isKey("aidx")) {
+    if (preferencesStore.getType("aidx") != PT_U8) {
+      return false;
+    }
+    const uint8_t firstRead = preferencesStore.getUChar("aidx", 254);
+    const uint8_t secondRead = preferencesStore.getUChar("aidx", 253);
+    if (firstRead != secondRead) {
+      return false;
+    }
+    savedIndex = firstRead;
   }
+  activeIndex_ = savedIndex < kMaxWiFiProfiles && profiles[savedIndex].inUse
+      ? static_cast<int8_t>(savedIndex)
+      : -1;
+  return savedIndex == 255 || activeIndex_ >= 0;
 }
 
-/**
- * @brief 首次启动时从 build flags 种子默认凭据
- *
- * 仅在 NVS 中无任何凭据（countStored()==0）且定义了 WIFI_SSID 时执行。
- * 将 WIFI_SSID/WIFI_PASSWORD 写入槽位 0 并设为激活状态。
- */
-void seedDefaultProfileIfNeeded() {
+bool seedDefaultProfileIfNeeded(bool &seeded) {
+  seeded = false;
   if (countStored() > 0 || std::strlen(WIFI_SSID) == 0) {
-    return;
+    return true;
+  }
+  if (std::strlen(WIFI_SSID) > 32 || std::strlen(WIFI_PASSWORD) > 64) {
+    debugPrintln("Default Wi-Fi profile from build flags is too long");
+    return false;
   }
 
-  char ssidKey[4] = {0};
-  char passwordKey[4] = {0};
-  makeWiFiProfileKeys(0, ssidKey, passwordKey);
-
-  // putString 返回写入字节数；0 表示失败（通常是 NVS 空间不足）
-  if (preferencesStore.putString(ssidKey, WIFI_SSID) == 0) {
-    debugPrintln("Failed to seed default Wi-Fi profile SSID");
-    return;
-  }
-
-  preferencesStore.putString(passwordKey, WIFI_PASSWORD);
   profiles[0] = {true, String(WIFI_SSID), String(WIFI_PASSWORD)};
   activeIndex_ = 0;
-  persistActiveIndex();
-  debugPrintf("Seeded default Wi-Fi profile from build flags: %s\n", WIFI_SSID);
+  seeded = true;
+  return true;
 }
 
 }  // namespace
 
 bool begin() {
-  // 以读写模式打开 NVS namespace "bridgecfg"（第二个参数 false = 读写）
+  storageReady_ = false;
   if (!preferencesStore.begin("bridgecfg", false)) {
     return false;
   }
 
-  loadProfiles();
-  seedDefaultProfileIfNeeded();
-
-  debugPrintf(
-      "Loaded Wi-Fi profiles: count=%d active=%d\n",
-      countStored(),
-      activeIndex_);
-  if (activeIndex_ >= 0) {
-    debugPrintf(
-        "Active Wi-Fi profile SSID: %s\n",
-        profiles[activeIndex_].ssid.c_str());
+  bool needsPersist = false;
+  if (preferencesStore.isKey(kConfigKey)) {
+    if (!loadConfigBlob()) {
+      debugPrintln("Invalid Wi-Fi config blob; refusing legacy fallback");
+      clearRuntimeConfig();
+      return false;
+    }
+  } else {
+    if (preferencesStore.isKey(kMigrationKey)) {
+      debugPrintln("Wi-Fi config blob is missing after migration; refusing legacy fallback");
+      clearRuntimeConfig();
+      return false;
+    }
+    if (!loadLegacyConfig()) {
+      debugPrintln("Failed to read legacy Wi-Fi config; refusing migration");
+      clearRuntimeConfig();
+      return false;
+    }
+    needsPersist = true;
+  }
+  bool seeded = false;
+  if (!seedDefaultProfileIfNeeded(seeded)) {
+    return false;
+  }
+  needsPersist = needsPersist || seeded;
+  if (!persistMigrationMarker() || (needsPersist && !persistConfig())) {
+    return false;
+  }
+  removeLegacyConfig();
+  storageReady_ = true;
+  if (seeded) {
+    debugPrintf("Seeded default Wi-Fi profile from build flags: %s\n", WIFI_SSID);
   }
 
+  debugPrintf("Loaded Wi-Fi profiles: count=%d active=%d\n", countStored(), activeIndex_);
   return true;
 }
 
@@ -148,20 +310,21 @@ int8_t activeIndex() {
   return activeIndex_;
 }
 
-bool setActiveIndex(int8_t index) {
-  if (index < 0) {
-    // 清除激活状态
-    activeIndex_ = -1;
-    persistActiveIndex();
-    return true;
-  }
+bool ready() {
+  return storageReady_;
+}
 
-  if (index >= kMaxWiFiProfiles || !profiles[index].inUse) {
+bool setActiveIndex(int8_t index) {
+  if (index < -1 || index >= kMaxWiFiProfiles ||
+      (index >= 0 && !profiles[index].inUse)) {
     return false;
   }
-
+  const int8_t previousIndex = activeIndex_;
   activeIndex_ = index;
-  persistActiveIndex();
+  if (!commitConfig()) {
+    activeIndex_ = previousIndex;
+    return false;
+  }
   return true;
 }
 
@@ -173,60 +336,47 @@ bool profileInUse(uint8_t index) {
   return index < kMaxWiFiProfiles && profiles[index].inUse;
 }
 
-/**
- * @brief 保存凭据到指定槽位
- *
- * 若 password 为空且该槽位已有凭据，则保留原密码（实现"仅修改 SSID"场景）。
- *
- * @param index    目标槽位
- * @param ssid     网络名称（不可为空）
- * @param password 密码（可为空：开放网络或保留原密码）
- * @return true 保存成功
- */
-bool save(uint8_t index, const String &ssid, const String &password) {
-  if (index >= kMaxWiFiProfiles || ssid.isEmpty()) {
+bool save(
+    uint8_t index,
+    const String &ssid,
+    const String &password,
+    bool activate) {
+  if (index >= kMaxWiFiProfiles || ssid.isEmpty() || ssid.length() > 32 ||
+      password.length() > 64) {
     return false;
   }
 
-  char ssidKey[4] = {0};
-  char passwordKey[4] = {0};
-  makeWiFiProfileKeys(index, ssidKey, passwordKey);
-
-  if (preferencesStore.putString(ssidKey, ssid) == 0) {
+  const WiFiProfile previousProfile = profiles[index];
+  const int8_t previousIndex = activeIndex_;
+  profiles[index] = {true, ssid, password};
+  if (activate) {
+    activeIndex_ = static_cast<int8_t>(index);
+  }
+  if (!commitConfig()) {
+    profiles[index] = previousProfile;
+    activeIndex_ = previousIndex;
     return false;
   }
-
-  // 密码为空时保留原密码，实现渐进式修改
-  String effectivePassword = password;
-  if (password.isEmpty() && profiles[index].inUse) {
-    effectivePassword = profiles[index].password;
-  }
-  preferencesStore.putString(passwordKey, effectivePassword);
-  profiles[index] = {true, ssid, effectivePassword};
   return true;
 }
 
-/**
- * @brief 删除指定槽位的凭据
- *
- * 从 NVS 中移除键值，并重置内存中对应槽位为未使用状态。
- * 若删除的是当前激活槽位，则同时清除激活状态（切换到 AP fallback）。
- */
-void remove(uint8_t index) {
+bool remove(uint8_t index) {
   if (index >= kMaxWiFiProfiles) {
-    return;
+    return false;
   }
 
-  char ssidKey[4] = {0};
-  char passwordKey[4] = {0};
-  makeWiFiProfileKeys(index, ssidKey, passwordKey);
-  preferencesStore.remove(ssidKey);
-  preferencesStore.remove(passwordKey);
+  const WiFiProfile previousProfile = profiles[index];
+  const int8_t previousIndex = activeIndex_;
   profiles[index] = {false, String(), String()};
-
   if (activeIndex_ == static_cast<int8_t>(index)) {
-    setActiveIndex(-1);
+    activeIndex_ = -1;
   }
+  if (!commitConfig()) {
+    profiles[index] = previousProfile;
+    activeIndex_ = previousIndex;
+    return false;
+  }
+  return true;
 }
 
 }

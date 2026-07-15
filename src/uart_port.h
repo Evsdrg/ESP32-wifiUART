@@ -15,6 +15,9 @@ HardwareSerial &serial();
 /** @brief 获取当前生效的 UART 参数 */
 const UartSettings &settings();
 
+/** @brief UART1 驱动当前是否已成功启动 */
+bool isRunning();
+
 /**
  * @brief 将 UartSettings 映射为 ESP32 serial_config 位域值
  * @param settings     UART 参数
