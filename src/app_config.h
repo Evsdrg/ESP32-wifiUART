@@ -74,6 +74,7 @@ constexpr bool kEnableDebugLogs = false;
 
 constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 constexpr uint32_t kWifiReconnectIntervalMs = 3000;
+constexpr uint32_t kWifiFallbackRetryIntervalMs = 30000;
 constexpr uint32_t kWifiScanTimeoutMs = 12000;
 #if CONFIGURE_WIFI_TX_POWER
 constexpr wifi_power_t kWifiTxPower = WIFI_TX_POWER;

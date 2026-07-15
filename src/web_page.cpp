@@ -205,8 +205,9 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
 
     // 将当前 UART 参数渲染到表单显示区
     function renderCurrent(data) {
+      const runningText = data.running === false ? ' | UART 已停止' : '';
       currentEl.textContent =
-        `波特率: ${data.baudRate} | 数据位: ${data.dataBits} | 校验位: ${data.parity} | 停止位: ${data.stopBits}`;
+        `波特率: ${data.baudRate} | 数据位: ${data.dataBits} | 校验位: ${data.parity} | 停止位: ${data.stopBits}${runningText}`;
       form.baudRate.value = data.baudRate;
       baudRatePresetEl.value = commonBaudRates.includes(String(data.baudRate)) ? String(data.baudRate) : 'custom';
       form.dataBits.value = String(data.dataBits);
@@ -308,8 +309,9 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       const activeText = data.activeIndex >= 0 ? `槽位 ${data.activeIndex}` : '无';
       const connectedText = data.connectedSsid || '无';
       const ipText = data.ip || '不可用';
+      const storageText = data.storageReady === false ? ' | 配置存储异常，请显式保存以修复' : '';
       wifiCurrentEl.textContent =
-        `当前模式: ${modeText} | 启用槽位: ${activeText} | 已连 Wi‑Fi: ${connectedText} | IP 地址: ${ipText}`;
+        `当前模式: ${modeText} | 启用槽位: ${activeText} | 已连 Wi‑Fi: ${connectedText} | IP 地址: ${ipText}${storageText}`;
 
       if (!data.profiles.length) {
         profilesEl.innerHTML = '<div class="subtle">当前还没有保存任何 Wi-Fi 配置。</div>';
@@ -356,6 +358,10 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
         }
 
         scanPollTimer = null;
+        if (data.failed) {
+          scanResultsEl.innerHTML = '<div class="subtle">扫描失败，旧结果已清空。</div>';
+          throw new Error('Wi-Fi 扫描失败或超时');
+        }
         renderScanResults(data);
         scanStatusEl.textContent = `共扫描到 ${data.networks.length} 个热点。`;
       } catch (error) {
@@ -389,7 +395,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       if (!response.ok) {
         throw new Error(data.error || '请求失败');
       }
-      await refreshWiFi();
+      renderWiFi(data);
       return data;
     }
 
@@ -451,10 +457,8 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       const ssid = item.dataset.ssid;
       const isOpenNetwork = item.dataset.open === '1';
       wifiForm.ssid.value = ssid;
-      if (isOpenNetwork) {
-        wifiForm.password.value = '';
-        wifiForm.keepPassword.value = '0';
-      }
+      wifiForm.password.value = '';
+      wifiForm.keepPassword.value = isOpenNetwork ? '0' : '1';
       wifiForm.activate.value = '1';
       updatePasswordHint(isOpenNetwork);
       wifiStatusEl.textContent = `已选择 ${ssid || '<hidden>'} 并填入 Wi-Fi 表单。`;
@@ -476,6 +480,10 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
         if (data.scanning) {
           scanPollTimer = window.setTimeout(pollScanUntilComplete, 500);
         } else {
+          if (data.failed) {
+            scanResultsEl.innerHTML = '<div class="subtle">扫描失败，旧结果已清空。</div>';
+            throw new Error('Wi-Fi 扫描失败或超时');
+          }
           renderScanResults(data);
           scanStatusEl.textContent = `共扫描到 ${data.networks.length} 个热点。`;
         }

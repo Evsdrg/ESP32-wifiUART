@@ -18,7 +18,6 @@
 #include "wifi_profiles.h"
 
 #include <Arduino.h>
-#include <WiFi.h>
 
 namespace wifi_uart {
 namespace app {
@@ -49,11 +48,9 @@ void setup() {
     Serial.begin(kDebugBaudRate);
   }
 
-  // 初始化 NVS Wi-Fi 凭据存储；失败时重启
+  // 损坏或不可读的 Wi-Fi 配置保持锁定状态，继续启动 AP 供显式修复。
   if (!wifi_profiles::begin()) {
-    debugPrintln("Failed to initialize Preferences. Restarting in 2 seconds.");
-    delay(2000);
-    ESP.restart();
+    debugPrintln("Wi-Fi profile storage unavailable; starting with no active profile");
   }
 
   // 初始化 TCP↔UART 环形缓冲区；分配失败时重启
@@ -72,12 +69,6 @@ void setup() {
 
   initStatusLed();
   showStatusLed();
-
-  // 关闭 Wi-Fi 睡眠以降低延迟；可选配置发射功率
-  WiFi.setSleep(false);
-#if CONFIGURE_WIFI_TX_POWER
-  WiFi.setTxPower(kWifiTxPower);
-#endif
 
   // 启动 Wi-Fi 管理器（内部启动 TCP Server）和 HTTP 服务器
   wifi_manager::begin(showStatusLed);
@@ -106,16 +97,25 @@ void loop() {
   // 轮询异步 Wi-Fi 扫描（非阻塞，扫描期间桥接不中断）
   wifi_manager::pollScan();
 
+  HardwareSerial &uartPort = uart_port::serial();
+
+  // 新会话建立前丢弃无主 UART 输入，避免旧硬件 RX 数据串入新客户端。
+  if (!bridge::isTcpClientConnected()) {
+    bridge::pullUartIntoBuffer(uartPort);
+  }
+
   // TCP Server 接受新客户端
-  bridge::acceptClientIfNeeded();
+  bridge::acceptClientIfNeeded(uartPort, uart_port::isRunning());
 
-  // TCP → UART 数据通路
-  bridge::pullTcpIntoBuffer();
-  bridge::flushTcpBufferToUart(uart_port::serial());
+  if (uart_port::isRunning()) {
+    // TCP → UART 数据通路
+    bridge::pullTcpIntoBuffer();
+    bridge::flushTcpBufferToUart(uartPort);
 
-  // UART → TCP 数据通路
-  bridge::pullUartIntoBuffer(uart_port::serial());
-  bridge::flushUartBufferToTcp();
+    // UART → TCP 数据通路
+    bridge::pullUartIntoBuffer(uartPort);
+    bridge::flushUartBufferToTcp();
+  }
 
   // 定期打印桥接统计信息
   bridge::logStatsIfNeeded(
