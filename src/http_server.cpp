@@ -104,6 +104,40 @@ void addUartSettingsJson(JsonDocument &doc) {
 }
 
 /**
+ * @brief 严格解析无符号十进制字符串
+ *
+ * 与 String::toInt() 不同，本函数拒绝空串、非数字字符（如 "300abc"、
+ * "0x10"）和溢出，只接受纯十进制数字。
+ *
+ * @param value 输入字符串
+ * @param out   输出：解析后的值
+ * @return true 解析成功
+ */
+bool parseUnsignedDecimal(const String &value, uint32_t &out) {
+  if (value.isEmpty()) {
+    return false;
+  }
+
+  uint32_t parsed = 0;
+  for (size_t i = 0; i < value.length(); ++i) {
+    const char ch = value[i];
+    if (ch < '0' || ch > '9') {
+      return false;
+    }
+
+    const uint32_t digit = static_cast<uint32_t>(ch - '0');
+    if (parsed > (UINT32_MAX - digit) / 10U) {
+      return false;  // 溢出保护
+    }
+
+    parsed = (parsed * 10U) + digit;
+  }
+
+  out = parsed;
+  return true;
+}
+
+/**
  * @brief 从 HTTP 请求参数解析 UART 设置
  *
  * 校验范围：baudRate >= 300，dataBits 5-8，parity 单字符，stopBits 1 或 2。
@@ -120,13 +154,35 @@ bool parseUartSettingsFromRequest(UartSettings &settings, String &error) {
     return false;
   }
 
-  const uint32_t baudRate = static_cast<uint32_t>(server.arg("baudRate").toInt());
-  const uint8_t dataBits = static_cast<uint8_t>(server.arg("dataBits").toInt());
+  uint32_t baudRate = 0;
+  uint32_t dataBitsValue = 0;
+  uint32_t stopBitsValue = 0;
+
+  if (!parseUnsignedDecimal(server.arg("baudRate"), baudRate)) {
+    error = "Baud rate must be a positive integer";
+    return false;
+  }
+
+  if (!parseUnsignedDecimal(server.arg("dataBits"), dataBitsValue) ||
+      !parseUnsignedDecimal(server.arg("stopBits"), stopBitsValue)) {
+    error = "UART data bits and stop bits must be positive integers";
+    return false;
+  }
+
   const String parityArg = server.arg("parity");
-  const uint8_t stopBits = static_cast<uint8_t>(server.arg("stopBits").toInt());
 
   if (baudRate < 300) {
     error = "Baud rate must be >= 300";
+    return false;
+  }
+
+  if (dataBitsValue < 5 || dataBitsValue > 8) {
+    error = "Data bits must be between 5 and 8";
+    return false;
+  }
+
+  if (stopBitsValue != 1 && stopBitsValue != 2) {
+    error = "Stop bits must be 1 or 2";
     return false;
   }
 
@@ -135,7 +191,11 @@ bool parseUartSettingsFromRequest(UartSettings &settings, String &error) {
     return false;
   }
 
-  settings = {baudRate, dataBits, static_cast<char>(toupper(parityArg[0])), stopBits};
+  settings = {
+      baudRate,
+      static_cast<uint8_t>(dataBitsValue),
+      static_cast<char>(toupper(parityArg[0])),
+      static_cast<uint8_t>(stopBitsValue)};
   uint32_t serialConfig = SERIAL_8N1;
   if (!uart_port::mapUartConfig(settings, serialConfig)) {
     error = "Unsupported UART framing combination";
@@ -158,8 +218,8 @@ bool parseProfileIndexArg(uint8_t &index, String &error) {
     return false;
   }
 
-  const int parsed = server.arg("index").toInt();
-  if (parsed < 0 || parsed >= kMaxWiFiProfiles) {
+  uint32_t parsed = 0;
+  if (!parseUnsignedDecimal(server.arg("index"), parsed) || parsed >= kMaxWiFiProfiles) {
     error = "Profile index out of range";
     return false;
   }
@@ -234,8 +294,18 @@ void handleSaveWiFiProfile() {
     return;
   }
 
+  if (ssid.length() > 32) {
+    sendJsonError(400, "Wi-Fi name must be at most 32 bytes");
+    return;
+  }
+
   // 密码为空时默认兼容旧调用方保留旧密码；显式 keepPassword=0 时才清空。
   String password = server.arg("password");
+  if (password.length() > 64) {
+    sendJsonError(400, "Wi-Fi password must be at most 64 bytes");
+    return;
+  }
+
   const bool keepExistingPassword = !server.hasArg("keepPassword") || server.arg("keepPassword") == "1";
   if (password.isEmpty() && keepExistingPassword && wifi_profiles::profileInUse(index)) {
     password = wifi_profiles::profile(index).password;
