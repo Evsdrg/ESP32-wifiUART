@@ -369,7 +369,6 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
         ? '已选择开放网络，可以不填写密码。'
         : '密码留空默认保留旧密码；如果要开放网络或清空密码，请选择保存为空密码。';
     }
-    }
 
     async function refreshWiFi() {
       const response = await fetch('/api/wifi');
@@ -452,10 +451,8 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       const ssid = item.dataset.ssid;
       const isOpenNetwork = item.dataset.open === '1';
       wifiForm.ssid.value = ssid;
-      if (isOpenNetwork) {
-        wifiForm.password.value = '';
-        wifiForm.keepPassword.value = '0';
-      }
+      wifiForm.password.value = '';
+      wifiForm.keepPassword.value = isOpenNetwork ? '0' : '1';
       wifiForm.activate.value = '1';
       updatePasswordHint(isOpenNetwork);
       wifiStatusEl.textContent = `已选择 ${ssid || '<hidden>'} 并填入 Wi-Fi 表单。`;
