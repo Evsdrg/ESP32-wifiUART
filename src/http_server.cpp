@@ -80,6 +80,7 @@ void addWiFiProfilesJson(JsonDocument &doc) {
 
 /** @brief 向 JSON 文档填充最近一次 Wi-Fi 扫描结果 */
 void addWiFiScanResultsJson(JsonDocument &doc) {
+  doc["scanning"] = wifi_manager::scanInProgress();
   JsonArray networks = doc["networks"].to<JsonArray>();
   for (size_t i = 0; i < wifi_manager::scanResultCount(); ++i) {
     const WiFiScanResult &scanResult = wifi_manager::scanResult(i);
@@ -307,7 +308,19 @@ void handleDeleteWiFiProfile() {
   sendJsonDocument(200, doc);
 }
 
-/** @brief POST /api/wifi/scan : 触发 Wi-Fi 扫描并返回结果 */
+/** @brief GET /api/wifi/scan : 返回当前扫描状态和最近结果 */
+void handleGetWiFiScan() {
+  JsonDocument doc;
+  addWiFiScanResultsJson(doc);
+  sendJsonDocument(200, doc);
+}
+
+/**
+ * @brief POST /api/wifi/scan : 触发异步 Wi-Fi 扫描并返回当前状态
+ *
+ * 立即返回（scanning=true 表示后台扫描进行中），
+ * 前端通过 GET /api/wifi/scan 轮询直到 scanning=false 再读取结果。
+ */
 void handleScanWiFi() {
   wifi_manager::scanNearby();
   JsonDocument doc;
@@ -326,6 +339,7 @@ void begin() {
   // 注册所有路由
   server.on("/", HTTP_GET, handleConfigPage);
   server.on("/api/wifi", HTTP_GET, handleGetWiFiProfiles);
+  server.on("/api/wifi/scan", HTTP_GET, handleGetWiFiScan);
   server.on("/api/wifi/scan", HTTP_POST, handleScanWiFi);
   server.on("/api/wifi/save", HTTP_POST, handleSaveWiFiProfile);
   server.on("/api/wifi/activate", HTTP_POST, handleActivateWiFiProfile);

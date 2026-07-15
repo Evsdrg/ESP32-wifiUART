@@ -68,6 +68,9 @@ String ipAddress();
  */
 void scanNearby();
 
+/** @brief 轮询异步 Wi-Fi 扫描状态并在完成时缓存结果 */
+void pollScan();
+
 /** @brief 返回最近一次扫描的结果数量 */
 size_t scanResultCount();
 

@@ -186,6 +186,7 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
     const helpModalTextEl = document.getElementById('help-modal-text');
     const helpModalCloseEl = document.getElementById('help-modal-close');
     const commonBaudRates = ['9600', '19200', '38400', '57600', '115200', '230400', '460800', '921600'];
+    let scanPollTimer = null;
 
     // 初始化 24 个 Profile 槽位下拉选项
     for (let i = 0; i < 24; i += 1) {
@@ -329,6 +330,33 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
       }).join('');
     }
 
+    async function fetchScanResults() {
+      const response = await fetch('/api/wifi/scan');
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || '读取扫描结果失败');
+      }
+      return data;
+    }
+
+    async function pollScanUntilComplete() {
+      try {
+        const data = await fetchScanResults();
+        if (data.scanning) {
+          scanStatusEl.textContent = '正在扫描附近 Wi-Fi...';
+          scanPollTimer = window.setTimeout(pollScanUntilComplete, 500);
+          return;
+        }
+
+        scanPollTimer = null;
+        renderScanResults(data);
+        scanStatusEl.textContent = `共扫描到 ${data.networks.length} 个热点。`;
+      } catch (error) {
+        scanPollTimer = null;
+        scanStatusEl.textContent = error.message;
+      }
+    }
+
     function updatePasswordHint(isOpenNetwork) {
       wifiPasswordHintEl.textContent = isOpenNetwork
         ? '已选择开放网络，可以不填写密码。'
@@ -426,14 +454,23 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
 
     scanButton.addEventListener('click', async () => {
       scanStatusEl.textContent = '正在扫描附近 Wi-Fi...';
+      if (scanPollTimer !== null) {
+        window.clearTimeout(scanPollTimer);
+        scanPollTimer = null;
+      }
+
       try {
         const response = await fetch('/api/wifi/scan', { method: 'POST' });
         const data = await response.json();
         if (!response.ok) {
           throw new Error(data.error || '扫描失败');
         }
-        renderScanResults(data);
-        scanStatusEl.textContent = `共扫描到 ${data.networks.length} 个热点。`;
+        if (data.scanning) {
+          scanPollTimer = window.setTimeout(pollScanUntilComplete, 500);
+        } else {
+          renderScanResults(data);
+          scanStatusEl.textContent = `共扫描到 ${data.networks.length} 个热点。`;
+        }
       } catch (error) {
         scanStatusEl.textContent = error.message;
       }

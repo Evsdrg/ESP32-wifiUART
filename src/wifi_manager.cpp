@@ -38,6 +38,9 @@ bool stationWasConnected = false;
 /** @brief Wi-Fi 扫描是否进行中 */
 bool scanInProgressFlag = false;
 
+/** @brief 异步扫描启动时间戳（用于超时保护） */
+uint32_t scanStartedAtMs = 0;
+
 /** @brief 是否有待处理的 Wi-Fi 重配置请求 */
 bool pendingReconfigure = false;
 
@@ -336,52 +339,87 @@ String securityLabel(uint8_t encryptionType) {
 }
 
 /**
- * @brief 触发异步 Wi-Fi 扫描
+ * @brief 完成一次扫描：缓存结果、清理扫描数据、恢复 AP 模式
+ * @param count WiFi.scanComplete() 的返回值（<=0 表示无结果或失败）
+ */
+void finishScan(int16_t count) {
+  scanResultCountValue = 0;
+
+  if (count > 0) {
+    const size_t cappedCount = min(static_cast<size_t>(count), static_cast<size_t>(kMaxWiFiProfiles));
+    for (size_t i = 0; i < cappedCount; ++i) {
+      scanResults[i].ssid = WiFi.SSID(i);
+      scanResults[i].rssi = WiFi.RSSI(i);
+      scanResults[i].channel = static_cast<uint8_t>(WiFi.channel(i));
+      scanResults[i].encryption = static_cast<uint8_t>(WiFi.encryptionType(i));
+    }
+    scanResultCountValue = cappedCount;
+  }
+
+  WiFi.scanDelete();
+
+  // 扫描期间为可见性临时切到 AP_STA，结束后恢复纯 AP
+  if (accessPointActiveFlag) {
+    WiFi.mode(WIFI_AP);
+  }
+
+  scanInProgressFlag = false;
+  scanStartedAtMs = 0;
+  updateStatus();
+}
+
+/**
+ * @brief 触发异步 Wi-Fi 扫描（非阻塞）
  *
  * 扫描期间若 AP 已激活，则临时切换到 AP_STA 混合模式，
- * 扫描结束后恢复纯 AP 模式，保证设备在扫描期间仍可被访问。
+ * 保证设备在扫描期间仍可被访问。实际结果由 pollScan() 在主循环中收割，
+ * 避免阻塞主 loop 导致 TCP-UART 桥接停摆。
  */
 void scanNearby() {
+  if (scanInProgressFlag) {
+    return;  // 已有扫描进行中，避免重入
+  }
+
   scanInProgressFlag = true;
+  scanStartedAtMs = millis();
+  scanResultCountValue = 0;
   updateStatus();
 
   if (accessPointActiveFlag) {
     WiFi.mode(WIFI_AP_STA);
   }
 
-  scanResultCountValue = 0;
-  int16_t count = WiFi.scanNetworks(true, true);
-  while (count == WIFI_SCAN_RUNNING) {
-    delay(30);
-    updateStatus();
-    count = WiFi.scanComplete();
-  }
-  if (count <= 0) {
-    WiFi.scanDelete();
-    if (accessPointActiveFlag) {
-      WiFi.mode(WIFI_AP);
-    }
-    scanInProgressFlag = false;
-    updateStatus();
+  // 异步扫描：立即返回，不阻塞等待结果
+  const int16_t count = WiFi.scanNetworks(true, true);
+  if (count == WIFI_SCAN_RUNNING) {
     return;
   }
 
-  const size_t cappedCount = min(static_cast<size_t>(count), static_cast<size_t>(kMaxWiFiProfiles));
-  for (size_t i = 0; i < cappedCount; ++i) {
-    scanResults[i].ssid = WiFi.SSID(i);
-    scanResults[i].rssi = WiFi.RSSI(i);
-    scanResults[i].channel = static_cast<uint8_t>(WiFi.channel(i));
-    scanResults[i].encryption = static_cast<uint8_t>(WiFi.encryptionType(i));
-  }
-  scanResultCountValue = cappedCount;
-  WiFi.scanDelete();
+  // 少数情况下同步返回（立即失败等），直接收割
+  finishScan(count);
+}
 
-  if (accessPointActiveFlag) {
-    WiFi.mode(WIFI_AP);
+/**
+ * @brief 轮询异步扫描状态，在完成或超时时收割结果
+ *
+ * 必须在主循环中定期调用。扫描进行中直接返回，不阻塞；
+ * 超过 kWifiScanTimeoutMs 仍未完成则放弃并清理，防止卡死状态。
+ */
+void pollScan() {
+  if (!scanInProgressFlag) {
+    return;
   }
 
-  scanInProgressFlag = false;
-  updateStatus();
+  const int16_t count = WiFi.scanComplete();
+  if (count == WIFI_SCAN_RUNNING) {
+    if (millis() - scanStartedAtMs >= kWifiScanTimeoutMs) {
+      debugPrintln("WiFi scan timed out");
+      finishScan(WIFI_SCAN_FAILED);
+    }
+    return;
+  }
+
+  finishScan(count);
 }
 
 size_t scanResultCount() {
