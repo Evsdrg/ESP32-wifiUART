@@ -369,32 +369,6 @@ const char kConfigPageHtml[] PROGMEM = R"HTML(
         ? '已选择开放网络，可以不填写密码。'
         : '密码留空默认保留旧密码；如果要开放网络或清空密码，请选择保存为空密码。';
     }
-
-    async function fetchScanResults() {
-      const response = await fetch('/api/wifi/scan');
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || '读取扫描结果失败');
-      }
-      return data;
-    }
-
-    async function pollScanUntilComplete() {
-      try {
-        const data = await fetchScanResults();
-        if (data.scanning) {
-          scanStatusEl.textContent = '正在扫描附近 Wi-Fi...';
-          scanPollTimer = window.setTimeout(pollScanUntilComplete, 500);
-          return;
-        }
-
-        scanPollTimer = null;
-        renderScanResults(data);
-        scanStatusEl.textContent = `共扫描到 ${data.networks.length} 个热点。`;
-      } catch (error) {
-        scanPollTimer = null;
-        scanStatusEl.textContent = error.message;
-      }
     }
 
     async function refreshWiFi() {
