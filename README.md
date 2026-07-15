@@ -22,6 +22,7 @@ Check out the branch that matches your hardware before building or flashing.
 - Wi-Fi station mode with automatic fallback to AP mode when the initial STA connection times out
 - TCP bridge service on port `6638`
 - RFC2217 remote serial service on port `2217` for tools that need DTR/RTS, such as `esptool.py`
+- Linux CUSE host tool that exposes the Wi-Fi bridge as `/dev/ttyUSBx` for the default esptool serial path
 - Optional build-time Wi-Fi seeding through `platformio.ini`
 - Linux pseudo-serial access through `socat`
 
@@ -101,6 +102,35 @@ If a specific client ignores normal RFC2217 control acknowledgements poorly, pys
 
 ```bash
 esptool.py --chip esp32c3 --port rfc2217://<ESP32_IP>:2217?ign_set_control --baud 460800 write_flash 0x0 firmware.bin
+```
+
+## Linux ttyUSB Host Tool
+
+For tools that expect a local `/dev/ttyUSBx` device, build the CUSE helper:
+
+```bash
+cd tools
+make
+```
+
+Run it as root, choosing an unused `ttyUSBx` name:
+
+```bash
+sudo ./wifiuart-tty --host <ESP32_IP> --name ttyUSB10 -f
+```
+
+Then use the normal esptool serial path:
+
+```bash
+esptool.py --chip esp32c3 --port /dev/ttyUSB10 --baud 460800 write_flash 0x0 firmware.bin
+```
+
+The helper connects to the firmware RFC2217 service on port `2217`, implements the Linux serial ioctls used by pyserial/esptool, and presents the device as `/dev/ttyUSB10` by default. It intentionally suppresses pyserial's open-time DTR/RTS assertions, then forwards esptool's reset sequence so the target ESP can enter download mode through the configured DTR/RTS GPIOs.
+
+If `/dev/cuse` is missing, load the kernel module first:
+
+```bash
+sudo modprobe cuse
 ```
 
 ## Configuration Notes

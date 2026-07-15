@@ -22,6 +22,7 @@ ESP WiFi UART Bridge 是一个通过 Wi-Fi 暴露 TCP 套接字，并将其桥�
 - 支持 Wi-Fi STA 模式，启动时 STA 连接超时会自动回退到 AP 模式
 - TCP 桥接服务端口为 `6638`
 - RFC2217 远程串口服务端口为 `2217`，用于 `esptool.py` 等需要 DTR/RTS 的工具
+- Linux CUSE 上位机工具可将 Wi-Fi 桥接暴露为 `/dev/ttyUSBx`，用于 esptool 默认串口路径
 - 支持通过 `platformio.ini` 进行可选的构建时 Wi-Fi 初始化
 - 支持通过 `socat` 在 Linux 下映射为伪串口
 
@@ -101,6 +102,35 @@ RFC2217 服务默认开启，但 DTR/RTS 输出引脚默认为 `-1`，不会实�
 
 ```bash
 esptool.py --chip esp32c3 --port rfc2217://<ESP32_IP>:2217?ign_set_control --baud 460800 write_flash 0x0 firmware.bin
+```
+
+## Linux ttyUSB 上位机工具
+
+对于只能识别本地 `/dev/ttyUSBx` 的工具，可以构建 CUSE 辅助程序：
+
+```bash
+cd tools
+make
+```
+
+以 root 运行，并选择一个未被占用的 `ttyUSBx` 名称：
+
+```bash
+sudo ./wifiuart-tty --host <ESP32_IP> --name ttyUSB10 -f
+```
+
+之后即可使用 esptool 的普通串口路径：
+
+```bash
+esptool.py --chip esp32c3 --port /dev/ttyUSB10 --baud 460800 write_flash 0x0 firmware.bin
+```
+
+该工具会连接固件 `2217` 端口的 RFC2217 服务，在本地实现 pyserial/esptool 使用的 Linux 串口 ioctl，并默认创建 `/dev/ttyUSB10`。它会抑制 pyserial 打开串口时自动拉起 DTR/RTS 的动作，随后转发 esptool 的复位序列，让目标 ESP 通过已配置的 DTR/RTS GPIO 进入下载模式。
+
+如果系统没有 `/dev/cuse`，先加载内核模块：
+
+```bash
+sudo modprobe cuse
 ```
 
 ## 配置说明

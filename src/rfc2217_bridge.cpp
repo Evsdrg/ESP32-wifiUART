@@ -126,6 +126,24 @@ void resetProtocolState() {
   suboptionLength = 0;
 }
 
+void clearTcpToUartBuffer() {
+#if ENABLE_RFC2217_BRIDGE
+  tcpToUartBuffer.clear();
+#endif
+}
+
+void clearUartToTcpBuffer() {
+#if ENABLE_RFC2217_BRIDGE
+  uartToTcpBuffer.clear();
+#endif
+  pendingEscapedIacByte = false;
+}
+
+void clearSessionBuffers() {
+  clearTcpToUartBuffer();
+  clearUartToTcpBuffer();
+}
+
 void sendTelnetOption(uint8_t action, uint8_t option) {
 #if ENABLE_RFC2217_BRIDGE
   const uint8_t command[] = {kTelnetIac, action, option};
@@ -200,8 +218,8 @@ void initializeControlPin(int pin) {
   if (pin < 0) {
     return;
   }
+  digitalWrite(pin, controlInactiveLevel());
   pinMode(pin, OUTPUT);
-  writeControlPin(pin, false);
 }
 
 void setDtr(bool active) {
@@ -232,10 +250,7 @@ uint8_t currentStopSizeCode() {
 
 void applyUartSettings(const UartSettings &settings) {
   if (uart_port::applySettings(settings)) {
-#if ENABLE_RFC2217_BRIDGE
-    tcpToUartBuffer.clear();
-    uartToTcpBuffer.clear();
-#endif
+    clearSessionBuffers();
   }
 }
 
@@ -397,11 +412,11 @@ void handleSuboption(HardwareSerial &uartPort) {
       if (suboptionLength >= 3) {
 #if ENABLE_RFC2217_BRIDGE
         if (suboption[2] == kPurgeReceiveBuffer || suboption[2] == kPurgeBothBuffers) {
-          uartToTcpBuffer.clear();
+          clearUartToTcpBuffer();
           drainUartInput(uartPort);
         }
         if (suboption[2] == kPurgeTransmitBuffer || suboption[2] == kPurgeBothBuffers) {
-          tcpToUartBuffer.clear();
+          clearTcpToUartBuffer();
         }
 #endif
         sendSuboptionByte(kServerPurgeData, suboption[2]);
@@ -629,8 +644,7 @@ void disconnectClient(const char *reason) {
   const bool hadClient = rfcClientActive;
   rfcClient.stop();
   rfcClientActive = false;
-  tcpToUartBuffer.clear();
-  uartToTcpBuffer.clear();
+  clearSessionBuffers();
   resetProtocolState();
   setDtr(false);
   setRts(false);
@@ -642,7 +656,7 @@ void disconnectClient(const char *reason) {
 #endif
 }
 
-void acceptClientIfNeeded() {
+void acceptClientIfNeeded(HardwareSerial &uartPort) {
 #if ENABLE_RFC2217_BRIDGE
   if (!rfcServerStarted) {
     return;
@@ -665,14 +679,16 @@ void acceptClientIfNeeded() {
     bridge::disconnectTcpClient("rfc2217 session active");
   }
 
-  tcpToUartBuffer.clear();
-  uartToTcpBuffer.clear();
+  drainUartInput(uartPort);
+  clearSessionBuffers();
   resetProtocolState();
   newClient.setNoDelay(true);
   rfcClient = newClient;
   rfcClientActive = true;
   sendInitialNegotiation();
   debugPrintf("RFC2217 client connected: %s\n", rfcClient.remoteIP().toString().c_str());
+#else
+  (void)uartPort;
 #endif
 }
 

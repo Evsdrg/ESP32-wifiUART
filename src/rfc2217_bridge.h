@@ -18,7 +18,7 @@ void stopServer();
 void disconnectClient(const char *reason);
 
 /** @brief Accept one pending RFC2217 client when no RFC2217 session is active. */
-void acceptClientIfNeeded();
+void acceptClientIfNeeded(HardwareSerial &uartPort);
 
 /** @brief Service RFC2217 control and data paths for the active client. */
 void handleClient(HardwareSerial &uartPort);

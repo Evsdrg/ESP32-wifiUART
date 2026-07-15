@@ -113,20 +113,27 @@ void loop() {
   // 应用待处理的 Wi-Fi 重配置（Profile 切换后触发）
   wifi_manager::applyPendingReconfigureIfNeeded();
 
+  HardwareSerial &uartPort = uart_port::serial();
+
+  // 无活动会话时先丢弃旧 UART 输入，避免新客户端收到连接前残留数据。
+  if (!bridge::isTcpClientConnected() && !rfc2217_bridge::isClientConnected()) {
+    bridge::pullUartIntoBuffer(uartPort);
+  }
+
   // RFC2217 与原始 TCP 桥接互斥使用同一个 UART
-  rfc2217_bridge::acceptClientIfNeeded();
+  rfc2217_bridge::acceptClientIfNeeded(uartPort);
   if (rfc2217_bridge::isClientConnected()) {
-    rfc2217_bridge::handleClient(uart_port::serial());
+    rfc2217_bridge::handleClient(uartPort);
   } else {
     // TCP Server 接受新客户端
     bridge::acceptClientIfNeeded();
 
     // TCP → UART 数据通路
     bridge::pullTcpIntoBuffer();
-    bridge::flushTcpBufferToUart(uart_port::serial());
+    bridge::flushTcpBufferToUart(uartPort);
 
     // UART → TCP 数据通路
-    bridge::pullUartIntoBuffer(uart_port::serial());
+    bridge::pullUartIntoBuffer(uartPort);
     bridge::flushUartBufferToTcp();
   }
 
